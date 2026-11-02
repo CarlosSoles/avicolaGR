@@ -713,7 +713,7 @@ class ComercialService:
         est_cages = (order_in.requested_quantity + 7) // 8  # 8 aves por jaula
 
         client_match = next((c for c in cls._clients_store if c.get("id") == order_in.client_id or c.get("tax_id") == order_in.client_tax_id), None)
-        delivery_addr = client_match.get("address") if client_match else f"Punto de distribución oficial - Zona {order_in.zone_code}"
+        delivery_addr = order_in.delivery_address or (client_match.get("address") if client_match else f"Punto de distribución oficial - Zona {order_in.zone_code}")
 
         seller_full_name = getattr(order_in, "seller_full_name", None)
         if not seller_full_name:
@@ -752,6 +752,8 @@ class ComercialService:
             "gestor_username": None,
             "notes": order_in.notes,
             "delivery_address": delivery_addr,
+            "delivery_latitude": order_in.delivery_latitude,
+            "delivery_longitude": order_in.delivery_longitude,
             "created_at": now_str,
             "updated_at": now_str,
             "audit_log": [

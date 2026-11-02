@@ -53,6 +53,9 @@ class OrderCreate(BaseModel):
     suggested_barn_code: Optional[str] = Field(None, description="Código de galpón orientativo de Pecuaria")
     external_reference: Optional[str] = Field(None, description="Orden de Compra u OC del cliente")
     notes: Optional[str] = Field(None, description="Observaciones comerciales")
+    delivery_address: Optional[str] = Field(None, description="Dirección o punto de entrega físico")
+    delivery_latitude: Optional[float] = Field(None, description="Latitud Google Maps del punto de entrega")
+    delivery_longitude: Optional[float] = Field(None, description="Longitud Google Maps del punto de entrega")
     is_draft: bool = False
 
 
@@ -121,6 +124,8 @@ class OrderResponse(BaseModel):
     split_children_ids: List[str] = Field(default_factory=list)
     # Direcciones y contactos operativos
     delivery_address: Optional[str] = None
+    delivery_latitude: Optional[float] = None
+    delivery_longitude: Optional[float] = None
     farm_contact_phone: Optional[str] = None
 
 

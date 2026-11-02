@@ -342,7 +342,51 @@ class AdminService:
     async def list_farms(self) -> List[FarmCatalogItem]:
         """Retorna el catálogo oficial de 23 granjas."""
         return [
-            FarmCatalogItem(name=f["name"], code=f["code"], barns_count=10, status="OPERATIVO")
+            FarmCatalogItem(
+                name=f["name"],
+                code=f["code"],
+                barns_count=10,
+                status="OPERATIVO",
+                latitude=f.get("latitude"),
+                longitude=f.get("longitude"),
+            )
             for f in OFFICIAL_FARMS
         ]
+
+    async def update_farm_coordinates(
+        self, farm_code: str, lat: Optional[float], lng: Optional[float]
+    ) -> FarmCatalogItem:
+        """Actualiza las coordenadas GPS (Google Maps) de una granja."""
+        matched = None
+        for f in OFFICIAL_FARMS:
+            if f["code"].upper() == farm_code.upper():
+                f["latitude"] = lat
+                f["longitude"] = lng
+                matched = f
+                break
+
+        if not matched:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Granja con código '{farm_code}' no encontrada.",
+            )
+
+        try:
+            from sqlalchemy import text
+            await self.db.execute(
+                text("UPDATE public.farms SET latitude = :lat, longitude = :lng WHERE UPPER(code) = :code"),
+                {"lat": lat, "lng": lng, "code": farm_code.upper()},
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+
+        return FarmCatalogItem(
+            name=matched["name"],
+            code=matched["code"],
+            barns_count=10,
+            status="OPERATIVO",
+            latitude=matched.get("latitude"),
+            longitude=matched.get("longitude"),
+        )
 

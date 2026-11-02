@@ -60,4 +60,12 @@ class FarmCatalogItem(BaseModel):
     name: str
     barns_count: int = 10
     status: str = "OPERATIVO"
+    zone_code: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
+class FarmCoordinatesUpdate(BaseModel):
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 

@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS public.farms (
     name VARCHAR(100) NOT NULL UNIQUE,
     code VARCHAR(20) NOT NULL UNIQUE,
     zone_code VARCHAR(50) NOT NULL,
+    latitude NUMERIC(10, 7) NULL,
+    longitude NUMERIC(10, 7) NULL,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -286,6 +288,8 @@ CREATE TABLE IF NOT EXISTS public.orders (
     gestor_username VARCHAR(100) NULL,
     gestor_observation TEXT NULL,
     delivery_address TEXT NULL,
+    delivery_latitude NUMERIC(10, 7) NULL,
+    delivery_longitude NUMERIC(10, 7) NULL,
     notes TEXT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()

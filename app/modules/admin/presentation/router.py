@@ -19,6 +19,7 @@ from app.modules.admin.domain.schemas import (
     UserStatusUpdate,
     UserProfileResponse,
     FarmCatalogItem,
+    FarmCoordinatesUpdate,
 )
 
 # Router para autenticación
@@ -156,4 +157,20 @@ async def list_farms(
 ):
     service = AdminService(db)
     return await service.list_farms()
+
+
+@admin_router.put(
+    "/farms/{farm_code}/coordinates",
+    response_model=FarmCatalogItem,
+    summary="Actualizar Coordenadas de Granja",
+    description="Actualiza las coordenadas GPS (Latitud y Longitud de Google Maps) de una granja.",
+)
+async def update_farm_coordinates(
+    farm_code: str,
+    coords: FarmCoordinatesUpdate,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = AdminService(db)
+    return await service.update_farm_coordinates(farm_code, coords.latitude, coords.longitude)
 
