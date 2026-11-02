@@ -29,7 +29,6 @@ google-generativeai==0.5.4
 
 # Análisis Estadístico y Numérico (Muestreos de Pesaje)
 numpy==1.26.4
-scipy==1.13.0
 
 # Pruebas y Testing
 pytest==8.2.0
