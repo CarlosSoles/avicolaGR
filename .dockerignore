@@ -1,0 +1,36 @@
+# ==============================================================================
+# DOCKERIGNORE - BACKEND AVICOLA GR
+# ==============================================================================
+
+# Git
+.git
+.gitignore
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Caché Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variables de entorno secretas (Se configuran en Hugging Face Secrets)
+.env
+.env.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Documentación no necesaria en runtime
+*.md
+docs/
+
+# Logs
+*.log
+

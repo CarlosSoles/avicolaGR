@@ -1,0 +1,67 @@
+# ==============================================================================
+# GITIGNORE - BACKEND AVICOLA GR
+# ==============================================================================
+
+# Entornos virtuales Python
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Variables de entorno y credenciales (NUNCA SUBIR A GIT)
+.env
+.env.*
+!.env.example
+*.env
+
+# Caché y binarios de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing y Cobertura
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Logs del sistema
+*.log
+logs/
+
+# Editores y entornos de desarrollo
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Base de datos local (si se usa sqlite para tests)
+*.sqlite
+*.sqlite3
+*.db
