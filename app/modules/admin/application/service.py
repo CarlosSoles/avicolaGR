@@ -340,7 +340,21 @@ class AdminService:
         return {"detail": f"Usuario {user.full_name} eliminado exitosamente."}
 
     async def list_farms(self) -> List[FarmCatalogItem]:
-        """Retorna el catálogo oficial de 23 granjas."""
+        """Retorna el catálogo oficial de 23 granjas sincronizado con la base de datos."""
+        try:
+            from sqlalchemy import text
+            res = await self.db.execute(text("SELECT name, code, latitude, longitude FROM public.farms WHERE is_active = true ORDER BY name ASC"))
+            rows = res.fetchall()
+            if rows:
+                db_coords = {r[1].upper(): (float(r[2]) if r[2] is not None else None, float(r[3]) if r[3] is not None else None) for r in rows}
+                for f in OFFICIAL_FARMS:
+                    code_up = f["code"].upper()
+                    if code_up in db_coords:
+                        f["latitude"] = db_coords[code_up][0]
+                        f["longitude"] = db_coords[code_up][1]
+        except Exception as e:
+            print(f"Error consultando granjas en BD: {e}")
+
         return [
             FarmCatalogItem(
                 name=f["name"],
