@@ -122,3 +122,4 @@ class TransportVehicleModel(Base):
     zone_coverage = Column(JSONB, default=list, nullable=True)
     status = Column(String(30), default="DISPONIBLE", nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
