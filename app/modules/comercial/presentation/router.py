@@ -42,6 +42,15 @@ def _scoped_seller(current_user: AuthenticatedUser, requested: Optional[str]) ->
     return requested
 
 
+def _scoped_seller_id(current_user: AuthenticatedUser) -> Optional[str]:
+    """Identificador estable del vendedor (UUID) para aislar su cartera."""
+    if current_user.role in FULL_VISIBILITY_ROLES:
+        return None
+    if current_user.role == "vendedor":
+        return str(current_user.id)
+    return None
+
+
 async def _load_order_scoped(
     order_id: str,
     current_user: AuthenticatedUser,
@@ -53,9 +62,13 @@ async def _load_order_scoped(
     """
     order = await ComercialService.get_order_by_id(order_id, db=db)
     if current_user.role == "vendedor":
-        me = current_user.username or current_user.email or ""
-        owner = order.seller_username or ""
-        if owner and owner != me:
+        me_id = str(current_user.id)
+        me_name = current_user.username or current_user.email or ""
+        owner_id = str(order.seller_user_id) if order.seller_user_id else None
+        owner_name = order.seller_username or ""
+        # Prioridad al UUID (estable); respaldo por username para pedidos antiguos
+        is_owner = (owner_id == me_id) if owner_id else (owner_name == me_name)
+        if not is_owner:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Pedido '{order_id}' no encontrado.",
@@ -134,6 +147,7 @@ async def list_orders(
         status_filter=status,
         zone_filter=zone,
         seller_username=_scoped_seller(current_user, seller),
+        seller_user_id=_scoped_seller_id(current_user),
         db=db,
     )
 
@@ -172,6 +186,7 @@ async def create_order(
         order_in=order_in,
         seller_user_id=seller_id,
         seller_username=seller_name,
+        seller_full_name=current_user.full_name,
         db=db,
     )
 

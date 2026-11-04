@@ -257,9 +257,9 @@ def _model_to_order_dict(model: OrderModel) -> Dict[str, Any]:
         "client_id": str(model.client_id) if model.client_id else None,
         "client_name": model.client_name or "",
         "client_tax_id": model.client_tax_id,
-        "seller_user_id": str(model.seller_user_id) if model.seller_user_id else "vendedor",
-        "seller_username": model.seller_username or "vendedor",
-        "seller_full_name": model.seller_full_name or "Juan Carlos Pérez Gálvez",
+        "seller_user_id": str(model.seller_user_id) if model.seller_user_id else "",
+        "seller_username": model.seller_username or "",
+        "seller_full_name": model.seller_full_name or "",
         "zone_code": model.zone_code,
         "target_delivery_date": str(model.target_delivery_date),
         "requested_quantity": model.requested_quantity,
@@ -572,6 +572,7 @@ class ComercialService:
         status_filter: Optional[str] = None,
         zone_filter: Optional[str] = None,
         seller_username: Optional[str] = None,
+        seller_user_id: Optional[str] = None,
         db: Optional[AsyncSession] = None,
     ) -> List[OrderResponse]:
         """Lista los pedidos registrados desde la base de datos PostgreSQL."""
@@ -582,7 +583,13 @@ class ComercialService:
                     stmt = stmt.where(OrderModel.status == status_filter)
                 if zone_filter:
                     stmt = stmt.where(OrderModel.zone_code == zone_filter)
-                if seller_username:
+                # El aislamiento del vendedor se hace por UUID (no cambia si renombran la cuenta)
+                if seller_user_id:
+                    try:
+                        stmt = stmt.where(OrderModel.seller_user_id == UUID(seller_user_id))
+                    except (ValueError, TypeError):
+                        stmt = stmt.where(OrderModel.seller_username == seller_username)
+                elif seller_username:
                     stmt = stmt.where(OrderModel.seller_username == seller_username)
 
                 res = await db.execute(stmt)
@@ -602,7 +609,9 @@ class ComercialService:
             orders = [o for o in orders if o["status"] == status_filter]
         if zone_filter:
             orders = [o for o in orders if o["zone_code"] == zone_filter]
-        if seller_username:
+        if seller_user_id:
+            orders = [o for o in orders if str(o.get("seller_user_id")) == seller_user_id]
+        elif seller_username:
             orders = [o for o in orders if o["seller_username"] == seller_username]
 
         orders_sorted = sorted(
@@ -645,6 +654,7 @@ class ComercialService:
         order_in: OrderCreate,
         seller_user_id: str,
         seller_username: str,
+        seller_full_name: Optional[str] = None,
         db: Optional[AsyncSession] = None,
     ) -> OrderResponse:
         """Crea y persiste un nuevo pedido de venta en Supabase PostgreSQL."""
@@ -666,14 +676,8 @@ class ComercialService:
         est_kg = round(order_in.requested_quantity * avg_weight, 2)
         est_cages = int(math.ceil(order_in.requested_quantity / density))
 
-        seller_full_name = getattr(order_in, "seller_full_name", None)
-        if not seller_full_name:
-            if seller_username in ("vendedor1", "vendedor"):
-                seller_full_name = "Juan Carlos Pérez Gálvez"
-            elif seller_username == "vendedor2":
-                seller_full_name = "María Elena Rodríguez Soto"
-            else:
-                seller_full_name = seller_username.replace(".", " ").title()
+        # El nombre visible proviene del usuario autenticado (BD); sin mapeos fijos
+        display_name = (seller_full_name or "").strip() or seller_username
 
         now_dt = datetime.utcnow()
         now_str = now_dt.isoformat() + "Z"
@@ -721,7 +725,7 @@ class ComercialService:
                     client_tax_id=order_in.client_tax_id,
                     seller_user_id=seller_uuid,
                     seller_username=seller_username,
-                    seller_full_name=seller_full_name,
+                    seller_full_name=display_name,
                     zone_code=order_in.zone_code,
                     target_delivery_date=target_date_obj,
                     status=initial_status,
@@ -788,7 +792,7 @@ class ComercialService:
             "client_tax_id": order_in.client_tax_id,
             "seller_user_id": seller_user_id,
             "seller_username": seller_username,
-            "seller_full_name": seller_full_name,
+            "seller_full_name": display_name,
             "zone_code": order_in.zone_code,
             "target_delivery_date": order_in.target_delivery_date,
             "requested_quantity": order_in.requested_quantity,

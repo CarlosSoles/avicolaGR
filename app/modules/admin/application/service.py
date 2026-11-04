@@ -155,6 +155,7 @@ class AdminService:
                 email=admin.email,
                 role=admin.role,
                 username=admin.username,
+                full_name=admin.full_name,
             )
             return LoginResponse(
                 access_token=token,
@@ -195,6 +196,7 @@ class AdminService:
             email=user.email,
             role=user.role,
             username=user.username or user.email.split("@")[0],
+            full_name=user.full_name,
         )
 
         return LoginResponse(

@@ -73,6 +73,7 @@ def create_access_token(
     email: str,
     role: str,
     username: Optional[str] = None,
+    full_name: Optional[str] = None,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
     """Genera un JWT firmado con los metadatos del usuario."""
@@ -85,9 +86,10 @@ def create_access_token(
         "sub": str(user_id),
         "email": email,
         "username": username or email.split("@")[0],
+        "full_name": full_name,
         "role": role,
         "app_metadata": {"role": role, "provider": "system"},
-        "user_metadata": {"role": role, "username": username or email.split("@")[0]},
+        "user_metadata": {"role": role, "username": username or email.split("@")[0], "full_name": full_name},
         "aud": "authenticated",
         "exp": expire,
         "iat": datetime.utcnow(),
@@ -99,6 +101,7 @@ class AuthenticatedUser(BaseModel):
     id: UUID
     email: Optional[str] = None
     username: Optional[str] = None
+    full_name: Optional[str] = None
     role: str
     scopes: List[str] = []
 
@@ -112,11 +115,12 @@ def get_current_user(
     """
     # 0. Si no hay credenciales enviadas
     if not credentials:
-        if settings.DEBUG:
+        if settings.ALLOW_DEV_AUTH:
             return AuthenticatedUser(
                 id=UUID("11111111-2222-3333-4444-555555555555"),
                 email="admin@avicolagr.com",
                 username="admin",
+                full_name="Administrador de Desarrollo",
                 role="admin_sistema",
                 scopes=["all"],
             )
@@ -127,13 +131,14 @@ def get_current_user(
 
     token = credentials.credentials
 
-    # 1. Soporte de tokens para desarrollo y pruebas rápidas
-    if token.startswith("dev-token-"):
+    # 1. Soporte de tokens para desarrollo y pruebas rápidas (solo si está habilitado)
+    if token.startswith("dev-token-") and settings.ALLOW_DEV_AUTH:
         role_from_token = token.replace("dev-token-", "").strip() or "supervisor_pecuario"
         return AuthenticatedUser(
             id=UUID("11111111-2222-3333-4444-555555555555"),
             email=f"{role_from_token}@avicolagr.com",
             username=role_from_token,
+            full_name=None,
             role=role_from_token,
             scopes=["all"],
         )
@@ -181,19 +186,20 @@ def get_current_user(
         except Exception as e:
             last_error = e
 
-    # 5. Fallback en desarrollo
-    if payload is None and settings.DEBUG:
+    # 5. Fallback de desarrollo (NUNCA en producción: confiaría en tokens sin firma)
+    if payload is None and settings.ALLOW_DEV_AUTH:
         try:
             payload = jwt.decode(token, options={"verify_signature": False})
         except Exception:
             pass
 
     if payload is None:
-        if settings.DEBUG:
+        if settings.ALLOW_DEV_AUTH:
             return AuthenticatedUser(
                 id=UUID("11111111-2222-3333-4444-555555555555"),
                 email="admin@avicolagr.com",
                 username="admin",
+                full_name="Administrador de Desarrollo",
                 role="admin_sistema",
                 scopes=["all"],
             )
@@ -214,6 +220,7 @@ def get_current_user(
         id=UUID(user_id_str),
         email=email,
         username=username,
+        full_name=payload.get("full_name") or user_metadata.get("full_name"),
         role=role,
         scopes=user_metadata.get("scopes", []),
     )

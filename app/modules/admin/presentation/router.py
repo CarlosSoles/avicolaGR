@@ -8,12 +8,13 @@ from uuid import UUID
 from datetime import datetime
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_role, AuthenticatedUser
 from app.modules.admin.application.service import AdminService
+from app.modules.admin.infrastructure.models import UserProfileModel
 from app.modules.admin.domain.schemas import (
     LoginRequest,
     LoginResponse,
@@ -192,10 +193,16 @@ async def get_me(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # El perfil se lee de la base (fuente de verdad), no se inventa desde el token
+    res = await db.execute(select(UserProfileModel).where(UserProfileModel.id == current_user.id))
+    profile = res.scalar_one_or_none()
+    if profile:
+        return UserProfileResponse.model_validate(profile)
     return {
         "id": current_user.id,
         "email": current_user.email,
         "username": current_user.username,
+        "full_name": current_user.full_name,
         "role": current_user.role,
         "scopes": current_user.scopes,
     }

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Sistema de Planificación de Saca de Aves - Avícola GR"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
+    # Permite autenticación de desarrollo (dev-token-* y peticiones sin token).
+    # Debe quedar en False en producción: con True cualquiera puede suplantar roles.
+    ALLOW_DEV_AUTH: bool = False
     PORT: int = 8000
     API_V1_PREFIX: str = "/api/v1"
 
