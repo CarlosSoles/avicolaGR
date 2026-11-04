@@ -1,6 +1,7 @@
 # ==============================================================================
 # DOCKERFILE - BACKEND FASTAPI (AVÍCOLA GR)
-# Compatible con Hugging Face Spaces (Puerto 7860), Cloud Run, Koyeb y Docker local
+# Imagen para Render (Web Service con Docker) y ejecución local.
+# Render inyecta la variable PORT; el contenedor la respeta automáticamente.
 # ==============================================================================
 
 FROM python:3.10-slim
@@ -8,7 +9,7 @@ FROM python:3.10-slim
 # Evitar escritura de archivos .pyc y forzar salida inmediata en logs
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=7860
+    PORT=8000
 
 WORKDIR /app
 
@@ -26,14 +27,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copiar el código de la aplicación
 COPY . .
 
-# Crear usuario estándar para compatibilidad con Hugging Face Spaces (UID 1000)
+# Usuario sin privilegios
 RUN useradd -m -u 1000 user && \
     chown -R user:user /app
 USER user
 
-# Exponer el puerto estándar de Hugging Face
-EXPOSE 7860
+# Puerto por defecto (Render lo sobrescribe con su propia variable PORT)
+EXPOSE 8000
 
-# Comando de arranque dinámico (toma el puerto asignado por el entorno o 7860 por defecto)
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-7860}"]
-
+# Arranque dinámico: usa el puerto asignado por la plataforma o 8000 en local
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

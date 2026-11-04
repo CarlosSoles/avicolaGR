@@ -3,7 +3,8 @@
 # Archivo: backend/app/modules/agent/infrastructure/distances.py
 # ==============================================================================
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
+from math import radians, sin, cos, asin, sqrt
 
 # Costo promedio logístico de flete por kilómetro recorrido (combustible, peajes, desgaste camión 3 ejes)
 COST_PER_KM_SOLES = 4.50
@@ -42,6 +43,36 @@ FARM_TO_ZONE_DISTANCES_KM: Dict[str, Dict[str, float]] = {
     "507":   {"NORTE": 55.0, "CENTRO": 49.0, "SUR": 62.0, "METROPOLITANA": 51.0},
     "HARC2": {"NORTE": 58.0, "CENTRO": 52.0, "SUR": 65.0, "METROPOLITANA": 54.0},
 }
+
+
+def haversine_km(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """Distancia en línea recta (km) entre dos coordenadas WGS84."""
+    r = 6371.0
+    d_lat = radians(lat2 - lat1)
+    d_lon = radians(lon2 - lon1)
+    a = sin(d_lat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(d_lon / 2) ** 2
+    return round(2 * r * asin(sqrt(a)), 2)
+
+
+def distance_to_delivery_point(
+    farm_coords: Optional[Tuple[float, float]],
+    delivery_coords: Optional[Tuple[float, float]],
+    farm_code: str,
+    zone_code: str,
+) -> Tuple[float, str]:
+    """
+    Distancia granja → punto de entrega.
+    Usa coordenadas reales cuando ambas están disponibles; si no, cae a la matriz por zona.
+
+    Devuelve (km, origen) donde origen es 'COORDENADAS' o 'ZONA'.
+    """
+    if farm_coords and delivery_coords:
+        km = haversine_km(farm_coords[0], farm_coords[1], delivery_coords[0], delivery_coords[1])
+        return km, "COORDENADAS"
+
+    return get_farm_distance_km(farm_code, zone_code), "ZONA"
 
 
 def get_farm_distance_km(farm_code: str, zone_code: str) -> float:

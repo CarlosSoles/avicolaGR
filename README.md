@@ -1,85 +1,86 @@
-# 🐔 Backend - Sistema de Planificación de Saca de Aves (Avícola GR)
+# 🐔 Backend — Sistema de Planificación de Saca de Aves (Avícola GR)
 
-Backend modular desarrollado con **FastAPI**, **SQLAlchemy 2.0 (Async)**, **PostgreSQL en Supabase** y el copiloto de IA **ROXI (Google Gemini 2.0 Flash a costo $0.00)**.
+Backend modular desarrollado con **FastAPI**, **SQLAlchemy 2.0 (Async)**, **PostgreSQL en Supabase** y el copiloto **ROXI**.
 
-Este repositorio está preparado para ejecutarse localmente y para desplegarse de forma 100% gratuita y sin bloqueos de firewall en **Hugging Face Spaces (Docker)**.
+Desplegado en **Render** (contenedor Docker). El frontend se publica en **Cloudflare Pages** y consume la API a través de un **Cloudflare Worker** que actúa como proxy con dominio propio.
 
 ---
 
 ## 📋 Tabla de Contenidos
 1. [Arquitectura y Estructura](#-arquitectura-y-estructura)
-2. [Configuración de Base de Datos en Supabase](#-configuración-de-base-de-datos-en-supabase)
-3. [Instalación y Ejecución Local](#-instalación-y-ejecución-local)
-4. [Ejecución de Pruebas Automatizadas](#-ejecución-de-pruebas-automatizadas)
-5. [Guía de Despliegue en Hugging Face Spaces (Gratis)](#-guía-de-despliegue-en-hugging-face-spaces-gratis)
-6. [Conexión con el Frontend (Cloudflare Pages)](#-conexión-con-el-frontend-cloudflare-pages)
-7. [Endpoints Principales de la API](#-endpoints-principales-de-la-api)
+2. [Instalación y Ejecución Local](#-instalación-y-ejecución-local)
+3. [Base de Datos y Migraciones](#-base-de-datos-y-migraciones)
+4. [Pruebas Automatizadas](#-pruebas-automatizadas)
+5. [Despliegue del Backend en Render](#-despliegue-del-backend-en-render)
+6. [Cloudflare Worker (proxy de API)](#-cloudflare-worker-proxy-de-api)
+7. [Frontend en Cloudflare Pages](#-frontend-en-cloudflare-pages)
+8. [Endpoints Principales](#-endpoints-principales)
 
 ---
 
 ## 🏛 Arquitectura y Estructura
 
-El sistema sigue una arquitectura limpia hexagonal/modular con separación estricta de contextos delimitados (*Bounded Contexts*):
+Arquitectura modular por contextos delimitados (*Bounded Contexts*), con capas `domain` / `application` / `infrastructure` / `presentation`.
 
 ```text
 backend/
-├── Dockerfile                   # Configuración para Hugging Face Spaces (Puerto 7860)
-├── .dockerignore                # Archivos omitidos en el contenedor Docker
-├── .gitignore                   # Exclusiones de Git (previene filtrado de .env o venv)
+├── Dockerfile                   # Imagen para Render (puerto dinámico vía $PORT)
+├── .dockerignore
 ├── requirements.txt             # Dependencias Python fijadas
 ├── pytest.ini                   # Configuración de pruebas asíncronas
-├── .env.example                 # Plantilla de variables de entorno requeridas
-├── database/                    # Scripts SQL oficiales para Supabase
-│   ├── schema.sql               # Esquema DDL maestro completo (Tablas, Vistas, CDC)
-│   ├── seed.sql                 # Datos semilla (23 Granjas, Galpones, Clientes, Flota)
-│   └── migration_v2_comercial_roxi.sql # Migración incremental para bases de datos existentes
-├── tests/                       # Suite de pruebas automatizadas con pytest
+├── .env.example                 # Plantilla de variables de entorno
+├── database/                    # Scripts SQL para Supabase
+│   ├── schema.sql               # Esquema base
+│   ├── seed.sql                 # Datos semilla (23 granjas, galpones, flota, clientes)
+│   ├── migration_v2_comercial_roxi.sql
+│   ├── migration_v3_coordinates.sql
+│   ├── migration_v4_client_coordinates.sql
+│   ├── migration_v5_order_density.sql
+│   ├── migration_v6_order_status_check.sql
+│   ├── migration_v7_notification_reads.sql
+│   └── migration_v8_notifications.sql
+├── tests/                       # Pruebas automatizadas (pytest)
 └── app/
-    ├── main.py                  # Entrada ASGI FastAPI y configuración de CORS
-    ├── core/                    # Conexión DB asyncpg, Settings y Seguridad JWT
-    ├── shared/                  # Excepciones transversales de dominio
+    ├── main.py                  # Entrada ASGI, CORS y montaje de routers
+    ├── core/                    # Settings, conexión asyncpg y seguridad JWT
+    ├── shared/                  # Excepciones, auditoría y notificaciones
     └── modules/
-        ├── admin/               # Autenticación, perfiles y catálogos técnicos
-        ├── pecuaria/            # Pesajes ave por ave, especiales y Tabla General de Saldo
-        ├── comercial/           # Captura de pedidos, flota, lifecycle y split
-        └── agent/               # Agente ROXI: Gemini 2.0 Flash, distancias y scoring
+        ├── admin/               # Autenticación, usuarios, granjas y notificaciones
+        ├── pecuaria/            # Pesajes, especiales, movimientos y saldos
+        ├── comercial/           # Pedidos, clientes, densidad, flota y despacho
+        └── agent/               # Agente ROXI (recomendación de galpón)
 ```
 
----
-
-## 🗄 Configuración de Base de Datos en Supabase
-
-### Opción A: Base de Datos Nueva (Instalación desde Cero)
-1. Entra a tu proyecto en [Supabase Dashboard](https://supabase.com/dashboard).
-2. Ve a la sección **SQL Editor** en la barra lateral.
-3. Abre y copia el contenido de [`database/schema.sql`](database/schema.sql) y haz clic en **Run**.
-4. Luego, abre y copia el contenido de [`database/seed.sql`](database/seed.sql) y presiona **Run**.
-
-### Opción B: Base de Datos Existente (Migración Incremental)
-Si ya tenías datos creados en Supabase y solo deseas incorporar las tablas de **Flota**, **Campos de ROXI** y **Fraccionamiento de Pedidos**:
-* Copia y ejecuta en el **SQL Editor** el archivo [`database/migration_v2_comercial_roxi.sql`](database/migration_v2_comercial_roxi.sql).
+### Notas de comportamiento
+- La base de datos es la **única fuente de verdad** del módulo comercial: no hay respaldos en memoria en producción.
+- El **vendedor solo ve y modifica sus propios pedidos** (aislamiento por `seller_username` en la API).
+- El estado "leído" de las notificaciones se guarda por usuario en `notification_reads`.
+- Las notificaciones se generan por eventos (pedido creado/aprobado/observado, transporte, pesajes, especiales).
 
 ---
 
 ## 💻 Instalación y Ejecución Local
 
-### 1. Clonar el repositorio y entrar a la carpeta
+### 1. Clonar el repositorio y entrar en la carpeta
 ```bash
-git clone <URL_DE_TU_REPOSITORIO_BACKEND>
+git clone <URL_DEL_REPOSITORIO>
 cd backend
 ```
 
-### 2. Crear y activar el entorno virtual Python (3.10 o superior)
-* **En Windows (PowerShell):**
+### 2. Crear y activar el entorno virtual (Python 3.10+)
+* **Windows (PowerShell):**
   ```powershell
   python -m venv venv
   .\venv\Scripts\Activate.ps1
   ```
-* **En Linux / macOS / WSL:**
+* **Linux / macOS:**
   ```bash
   python3 -m venv venv
   source venv/bin/activate
   ```
+
+> Si PowerShell bloquea `Activate.ps1`, puedes ejecutar sin activar:
+> `.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000`
 
 ### 3. Instalar dependencias
 ```bash
@@ -88,131 +89,236 @@ pip install -r requirements.txt
 ```
 
 ### 4. Configurar variables de entorno
-Copia la plantilla y crea tu archivo `.env`:
-* **Windows (PowerShell):**
-  ```powershell
-  Copy-Item .env.example .env
-  ```
-* **Linux / Mac:**
-  ```bash
-  cp .env.example .env
-  ```
+```powershell
+Copy-Item .env.example .env    # Windows
+cp .env.example .env           # Linux / macOS
+```
 
-Abre `.env` y coloca tus claves reales:
+Variables principales:
+
 ```env
+ENVIRONMENT="development"
+DEBUG=True
+API_V1_PREFIX="/api/v1"
+CORS_ORIGINS=["http://localhost:5173","http://localhost:3000"]
+
 DATABASE_URL="postgresql+asyncpg://postgres:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres?ssl=require"
 SUPABASE_URL="https://[PROJECT_REF].supabase.co"
-SUPABASE_ANON_KEY="tu-anon-key"
-SUPABASE_SERVICE_ROLE_KEY="tu-service-role-key"
-GEMINI_API_KEY="tu-api-key-de-google-ai-studio"
+SUPABASE_ANON_KEY="..."
+SUPABASE_SERVICE_ROLE_KEY="..."
+SUPABASE_JWT_SECRET="..."
+
+GEMINI_API_KEY="..."
 GEMINI_MODEL="gemini-2.0-flash"
 ```
+
+> ⚠️ En producción `DEBUG` debe ser `False`. Con `DEBUG=True` el backend acepta tokens de desarrollo (`dev-token-*`) y omite la validación de firma.
 
 ### 5. Iniciar el servidor de desarrollo
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-* **Documentación Interactiva (Swagger UI):** [http://localhost:8000/docs](http://localhost:8000/docs)
-* **Documentación ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+- Healthcheck: http://localhost:8000/health (alias) y http://localhost:8000/api/v1/health
 
 ---
 
-## 🧪 Ejecución de Pruebas Automatizadas
+## 🗄 Base de Datos y Migraciones
 
-Para validar que todos los módulos y el agente ROXI funcionen al 100%:
+Ejecutar en el **SQL Editor de Supabase**, en este orden:
+
+1. `database/schema.sql`
+2. `database/seed.sql`
+3. `database/migration_v2_comercial_roxi.sql`
+4. `database/migration_v3_coordinates.sql`
+5. `database/migration_v4_client_coordinates.sql`
+6. `database/migration_v5_order_density.sql`
+7. `database/migration_v6_order_status_check.sql`
+8. `database/migration_v7_notification_reads.sql`
+9. `database/migration_v8_notifications.sql`
+
+Las migraciones son incrementales e idempotentes en su mayoría (`IF NOT EXISTS`, `ON CONFLICT`). Si partes de una base ya existente, ejecuta desde la migración que corresponda.
+
+### Tablas clave
+| Tabla | Uso |
+| :--- | :--- |
+| `farms`, `barns` | Catálogo de 23 granjas y 230 galpones |
+| `batches`, `barn_inventories` | Lotes e inventario (saldo disponible es columna generada) |
+| `orders` | Pedidos, densidad de carga, transporte y despacho |
+| `clients` | Catálogo de clientes con coordenadas de entrega |
+| `notification_reads`, `notifications` | Estado leído y notificaciones por evento |
+| `audit_logs` | Trazabilidad de operaciones |
+
+---
+
+## 🧪 Pruebas Automatizadas
 
 ```bash
-# Ejecutar todas las pruebas (22 tests)
 pytest -v
-
-# Ejecutar únicamente las pruebas del Agente ROXI
 pytest tests/test_roxi_agent.py -v
 ```
 
+> Las pruebas de integración usan la conexión real configurada en `.env` y los tokens `dev-token-*` (requieren `DEBUG=True` y el usuario de desarrollo en `users_profile`).
+
 ---
 
-## 🚀 Guía de Despliegue en Hugging Face Spaces (Gratis)
+## 🚀 Despliegue del Backend en Render
 
-Hugging Face Spaces es **100% gratuito**, te otorga **2 vCPUs y 16 GB de RAM**, y sus dominios (`*.hf.space`) **nunca son bloqueados por redes universitarias**.
+El backend se despliega como **Web Service (Docker)** en Render.
 
-### Paso 1: Crear el Space en Hugging Face
-1. Inicia sesión en [huggingface.co](https://huggingface.co).
-2. Haz clic en tu perfil $\rightarrow$ **New Space**.
+### 1. Crear el servicio
+1. En [render.com](https://render.com) → **New** → **Web Service**.
+2. Conecta el repositorio del backend.
 3. Configura:
-   * **Space name:** `avicola-backend` (o el nombre que elijas).
-   * **License:** `mit` u `other`.
-   * **Select the Space SDK:** Selecciona **Docker** $\rightarrow$ **Blank**.
-   * **Space hardware:** Selecciona **CPU Basic · 2 vCPU · 16 GB RAM · Free** ($0/mo).
-   * **Visibility:** `Public` (para que el frontend pueda conectarse).
-4. Haz clic en **Create Space**.
+   - **Environment:** `Docker`
+   - **Dockerfile Path:** `./Dockerfile`
+   - **Health Check Path:** `/health`
+   - **Auto-Deploy:** según tu preferencia (`On Commit` o manual)
 
-### Paso 2: Configurar las Variables de Entorno y Secretos en el Space
-1. En tu Space recién creado, ve a la pestaña **Settings** (engranaje).
-2. Baja a la sección **Variables and secrets**.
-3. Haz clic en **New secret** y agrega cada una de las siguientes variables (con tus valores reales):
+### 2. Variables de entorno en Render
+En **Environment → Environment Variables**, define:
 
-| Secret Name | Valor de Ejemplo | Descripción |
-| :--- | :--- | :--- |
-| `DATABASE_URL` | `postgresql+asyncpg://postgres:...` | Cadena directa a Supabase (puerto 5432) |
-| `SUPABASE_URL` | `https://kpssroraigncmpkwxiyb.supabase.co` | URL del proyecto Supabase |
-| `SUPABASE_ANON_KEY` | `eyJhbG...` | Anon Key pública de Supabase |
-| `SUPABASE_SERVICE_ROLE_KEY` | `eyJhbG...` | Service Role secreta de Supabase |
-| `GEMINI_API_KEY` | `AQ.Ab8RN6KeyKZES...` | Tu API Key de Google AI Studio |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Modelo de Gemini a usar |
-| `ENVIRONMENT` | `production` | Modo de ejecución |
+| Variable | Valor |
+| :--- | :--- |
+| `ENVIRONMENT` | `production` |
+| `DEBUG` | `False` |
+| `DATABASE_URL` | Cadena de Supabase (asyncpg, puerto 5432 o pooler 6543) |
+| `SUPABASE_URL` | `https://<PROJECT_REF>.supabase.co` |
+| `SUPABASE_ANON_KEY` | Anon key pública |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role (secreta) |
+| `SUPABASE_JWT_SECRET` | JWT secret del proyecto |
+| `GEMINI_API_KEY` | API key de Google AI Studio |
+| `GEMINI_MODEL` | `gemini-2.0-flash` |
 
-> **Nota sobre el puerto:** El archivo `Dockerfile` incluido ya tiene preconfigurado el puerto `7860` que Hugging Face requiere por defecto.
+> Render inyecta la variable `PORT`; el contenedor arranca con `uvicorn ... --port ${PORT}`. No fijes el puerto manualmente.
 
-### Paso 3: Subir el código del Backend al Space
-En tu terminal local, dentro de la carpeta `backend`:
+### 3. Verificación
+Cuando el servicio esté **Live**, comprueba:
 
-```bash
-# 1. Inicializar repositorio git si no está inicializado
-git init
-git branch -M main
-
-# 2. Agregar el remoto de Hugging Face (lo encuentras en la pestaña Files -> Clone repository)
-git remote add origin https://huggingface.co/spaces/<TU_USUARIO>/<NOMBRE_DE_TU_SPACE>
-
-# 3. Guardar y subir los archivos
-git add .
-git commit -m "feat: backend modular avicola con agente ROXI para Hugging Face"
-git push -u origin main --force
+```text
+https://<SERVICIO>.onrender.com/health
+https://<SERVICIO>.onrender.com/docs
 ```
 
-*(Cuando te pida contraseña al hacer push, ingresa tu **Access Token** de Hugging Face generado en `Settings -> Access Tokens` con rol `Write`).*
+Ambas deben responder `200`. El healthcheck reporta también el estado de la base de datos.
 
-Hugging Face compilará el contenedor automáticamente en ~2 minutos. Una vez diga **Running**, tu API estará activa en:
+### 4. Consideraciones
+- El plan gratuito de Render **duerme** el servicio tras inactividad: la primera petición puede tardar ~30-60 s. El frontend hace un *warm-up* al cargar.
+- El pool de conexiones está configurado para Supabase (PgBouncer/Supavisor): `statement_cache_size=0` y nombres de sentencia únicos.
+
+---
+
+## ☁️ Cloudflare Worker (proxy de API)
+
+El frontend no consume directamente el dominio de Render: pasa por un **Cloudflare Worker** que:
+
+- Expone la API bajo un dominio propio y estable.
+- Evita bloqueos de red y añade control de CORS/origen.
+- Permite cambiar el backend sin tocar el frontend.
+
+Configuración típica del Worker (ejemplo):
+
+```js
+export default {
+  async fetch(request) {
+    const backend = "https://<SERVICIO>.onrender.com";
+    const url = new URL(request.url);
+    const target = backend + url.pathname + url.search;
+
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Authorization,Content-Type",
+    };
+
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+
+    const response = await fetch(target, {
+      method: request.method,
+      headers: request.headers,
+      body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+    });
+
+    const out = new Response(response.body, response);
+    Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
+    return out;
+  },
+};
+```
+
+La URL resultante tiene la forma:
+
 ```text
-https://<TU_USUARIO>-<NOMBRE_DE_TU_SPACE>.hf.space/docs
+https://<WORKER>.<subdominio>.workers.dev/api/v1
 ```
 
 ---
 
-## 🌐 Conexión con el Frontend (Cloudflare Pages)
+## 🌐 Frontend en Cloudflare Pages
 
-Cuando despliegues el Frontend (React + Vite) en **Cloudflare Pages** o **GitHub Pages**, configura la variable de entorno en el panel de Cloudflare Pages:
+El frontend (React + Vite) se publica en **Cloudflare Pages**.
 
-```text
-VITE_API_BASE_URL=https://<TU_USUARIO>-<NOMBRE_DE_TU_SPACE>.hf.space/api/v1
+### Build
+| Parámetro | Valor |
+| :--- | :--- |
+| Framework preset | `Vite` |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+| Root directory | `fronted` |
+
+### Variables de entorno (Production)
+```env
+VITE_API_URL="https://<WORKER>.<subdominio>.workers.dev/api/v1"
+VITE_SUPABASE_URL="https://<PROJECT_REF>.supabase.co"
+VITE_SUPABASE_ANON_KEY="<anon-key>"
 ```
 
-La configuración CORS del backend ya incluye la directiva `allow_origin_regex=r"^https?://.*"`, lo que permite que tu frontend se comunique con el backend sin ningún bloqueo de CORS ni de red universitaria.
+> El frontend usa `VITE_API_URL` (no `VITE_API_BASE_URL`).
+
+### SPA routing
+El proyecto incluye `public/_redirects` con:
+
+```text
+/*    /index.html   200
+```
+
+Esto evita 404 al recargar rutas como `/comercial` o `/admin`.
+
+### CORS
+El backend permite el origen del frontend mediante `CORS_ORIGINS` y `allow_origin_regex`. Mantén ambos alineados con el dominio real de Pages (`*.pages.dev` y el dominio personalizado si aplica).
 
 ---
 
-## 📡 Endpoints Principales de la API
+## 📡 Endpoints Principales
 
 | Módulo | Método | Endpoint | Descripción |
 | :--- | :---: | :--- | :--- |
-| **Diagnóstico** | `GET` | `/api/v1/health` | Estado del backend y pool de Supabase. |
-| **Auth** | `POST` | `/api/v1/auth/login` | Login con credenciales de usuario. |
-| **Pecuaria** | `GET` | `/api/v1/pecuaria/tabla-general-saldo` | Saldos oficiales en vivo de las 23 granjas. |
-| **Comercial** | `GET` | `/api/v1/comercial/orders` | Bandeja de pedidos de venta. |
-| **Comercial** | `POST` | `/api/v1/comercial/orders` | Registro de nuevo pedido por el vendedor. |
-| **Gestión** | `POST` | `/api/v1/comercial/orders/{id}/dar-ok` | Aprobación formal y reserva en galpón. |
-| **Gestión** | `POST` | `/api/v1/comercial/orders/{id}/assign-transport` | Asignación de flota y turno de despacho. |
-| **Agente ROXI** | `POST` | `/api/v1/agent/recommend-barn` | Inferencia de galpón óptimo con Gemini 2.0. |
-| **Agente ROXI** | `POST` | `/api/v1/agent/chat` | Chat operativo con guardrails de saca. |
-| **Agente ROXI** | `GET` | `/api/v1/agent/status` | Diagnóstico de latencia y estado de IA. |
+| **Salud** | `GET` | `/health` · `/api/v1/health` | Estado del backend y de la base de datos. |
+| **Auth** | `POST` | `/api/v1/auth/login` | Login con usuario o correo. |
+| **Auth** | `GET` | `/api/v1/auth/me` | Perfil del usuario autenticado. |
+| **Admin** | `GET` | `/api/v1/admin/users` | Listado de usuarios (solo admin). |
+| **Admin** | `PUT` | `/api/v1/admin/farms/{code}/coordinates` | Coordenadas GPS de la granja. |
+| **Pecuaria** | `GET` | `/api/v1/pecuaria/tabla-general-saldo` | Saldo en vivo por galpón. |
+| **Pecuaria** | `POST` | `/api/v1/pecuaria/samples` · `/samples/{id}/weights` | Pesaje ave por ave. |
+| **Pecuaria** | `POST` | `/api/v1/pecuaria/specials` | Registro de aves especiales. |
+| **Comercial** | `GET` | `/api/v1/comercial/orders` | Pedidos (el vendedor ve solo los suyos). |
+| **Comercial** | `POST` | `/api/v1/comercial/orders` | Registro de pedido con densidad. |
+| **Comercial** | `POST` | `/api/v1/comercial/orders/{id}/aprobar` | Aprobación y reserva. |
+| **Comercial** | `PATCH` | `/api/v1/comercial/orders/{id}/density` | Ajuste de densidad (aves/jaula). |
+| **Comercial** | `POST` | `/api/v1/comercial/orders/{id}/assign-transport` | Asignación de flota. |
+| **Comercial** | `GET` | `/api/v1/comercial/clients` · `PUT /clients/{id}` | Catálogo de clientes y coordenadas. |
+| **Notificaciones** | `GET` | `/api/v1/notifications` | Notificaciones del usuario. |
+| **Notificaciones** | `PUT` | `/api/v1/notifications/reads` | Marcar leídas / no leídas. |
+| **ROXI** | `POST` | `/api/v1/agent/recommend-barn` | Recomendación de galpón. |
+| **ROXI** | `GET` | `/api/v1/agent/status` | Diagnóstico del agente. |
+
+---
+
+## 🔐 Notas de Seguridad
+
+- `DEBUG=False` obligatorio en producción; desactiva los tokens `dev-token-*` y el fallback sin firma.
+- `SUPABASE_JWT_SECRET` debe estar definido; el valor por defecto del código es solo para desarrollo.
+- Los vendedores solo acceden a sus pedidos; el resto de roles mantienen visibilidad completa.
+- No subir `.env` al repositorio (ya está en `.gitignore`).

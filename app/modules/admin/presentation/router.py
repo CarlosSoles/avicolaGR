@@ -3,9 +3,12 @@
 # Archivo: backend/app/modules/admin/presentation/router.py
 # ==============================================================================
 
-from typing import List
+from typing import List, Optional
 from uuid import UUID
+from datetime import datetime
 from fastapi import APIRouter, Depends, status
+from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -27,6 +30,125 @@ auth_router = APIRouter(prefix="/auth", tags=["Autenticación del Sistema"])
 
 # Router para administración (usuarios y configuración)
 admin_router = APIRouter(prefix="/admin", tags=["Módulo de Administración & Usuarios"])
+
+# Router de notificaciones leídas por usuario
+notifications_router = APIRouter(prefix="/notifications", tags=["Notificaciones"])
+
+
+class NotificationReadRequest(BaseModel):
+    keys: List[str]
+    read: bool = True
+
+
+class NotificationResponse(BaseModel):
+    id: str
+    category: str
+    type: str
+    title: str
+    description: str
+    badge: Optional[str] = None
+    farm_code: Optional[str] = None
+    order_id: Optional[str] = None
+    created_at: datetime
+    read: bool = False
+
+
+@notifications_router.get(
+    "",
+    response_model=List[NotificationResponse],
+    summary="Listar notificaciones del usuario",
+)
+async def list_notifications(
+    limit: int = 50,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Notificaciones generadas por eventos, visibles por rol o por usuario específico."""
+    res = await db.execute(
+        text("""
+            SELECT n.id::text, n.category, n.type, n.title, n.description, n.badge,
+                   n.farm_code, n.order_id::text, n.created_at,
+                   (r.notification_key IS NOT NULL) AS is_read
+            FROM public.notifications n
+            LEFT JOIN public.notification_reads r
+                   ON r.notification_key = n.id::text
+                  AND r.user_id = CAST(:uid AS uuid)
+            WHERE (n.target_user_id = CAST(:uid AS uuid))
+               OR (n.target_user_id IS NULL AND CAST(:role AS text) = ANY(n.target_roles))
+            ORDER BY n.created_at DESC
+            LIMIT :lim
+        """),
+        {"uid": str(current_user.id), "role": current_user.role, "lim": max(1, min(limit, 200))},
+    )
+    return [
+        {
+            "id": row[0],
+            "category": row[1],
+            "type": row[2],
+            "title": row[3],
+            "description": row[4],
+            "badge": row[5],
+            "farm_code": row[6],
+            "order_id": row[7],
+            "created_at": row[8],
+            "read": bool(row[9]),
+        }
+        for row in res.fetchall()
+    ]
+
+
+@notifications_router.get(
+    "/reads",
+    response_model=List[str],
+    summary="Listar notificaciones leídas por el usuario",
+)
+async def list_notification_reads(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Devuelve las claves de notificación que el usuario ya marcó como leídas."""
+    res = await db.execute(
+        text("SELECT notification_key FROM public.notification_reads WHERE user_id = CAST(:uid AS uuid)"),
+        {"uid": str(current_user.id)},
+    )
+    return [row[0] for row in res.fetchall()]
+
+
+@notifications_router.put(
+    "/reads",
+    summary="Marcar notificaciones como leídas o no leídas",
+)
+async def set_notification_reads(
+    req: NotificationReadRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persiste el estado de lectura en la base de datos, por usuario."""
+    if not req.keys:
+        return {"updated": 0, "read": req.read}
+
+    if req.read:
+        await db.execute(
+            text("""
+                INSERT INTO public.notification_reads (user_id, notification_key)
+                SELECT CAST(:uid AS uuid), k
+                FROM unnest(CAST(:keys AS text[])) AS k
+                ON CONFLICT (user_id, notification_key) DO NOTHING
+            """),
+            {"uid": str(current_user.id), "keys": req.keys},
+        )
+    else:
+        await db.execute(
+            text("""
+                DELETE FROM public.notification_reads
+                WHERE user_id = CAST(:uid AS uuid)
+                  AND notification_key = ANY(CAST(:keys AS text[]))
+            """),
+            {"uid": str(current_user.id), "keys": req.keys},
+        )
+
+    await db.commit()
+    return {"updated": len(req.keys), "read": req.read}
 
 
 # ------------------------------------------------------------------------------

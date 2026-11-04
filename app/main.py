@@ -14,7 +14,7 @@ from app.shared.domain.exceptions import DomainException
 
 # Importación de routers modulares
 from app.modules.pecuaria.presentation.router import router as pecuaria_router
-from app.modules.admin.presentation.router import auth_router, admin_router
+from app.modules.admin.presentation.router import auth_router, admin_router, notifications_router
 from app.modules.comercial.presentation.router import router as comercial_router
 from app.modules.agent.presentation.router import router as agent_router
 from app.modules.admin.application.service import AdminService
@@ -56,7 +56,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Configuración de CORS con soporte para entornos locales, Cloudflare Pages y Hugging Face
+# Configuración de CORS con soporte para entornos locales, Cloudflare Pages, Worker y Render
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -82,6 +82,7 @@ async def domain_exception_handler(request: Request, exc: DomainException):
 # Montar routers modulares
 app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin_router, prefix=settings.API_V1_PREFIX)
+app.include_router(notifications_router, prefix=settings.API_V1_PREFIX)
 app.include_router(pecuaria_router, prefix=settings.API_V1_PREFIX)
 app.include_router(comercial_router, prefix=settings.API_V1_PREFIX)
 app.include_router(agent_router, prefix=settings.API_V1_PREFIX)
@@ -99,6 +100,9 @@ async def root():
 
 
 # Healthcheck de sistema y base de datos
+# Se expone en dos rutas: la canónica versionada y el alias corto /health,
+# requerido por monitores externos y healthchecks de la plataforma de despliegue.
+@app.get("/health", tags=["Salud del Sistema"], include_in_schema=False)
 @app.get(f"{settings.API_V1_PREFIX}/health", tags=["Salud del Sistema"])
 async def health_check():
     db_status = "connected"

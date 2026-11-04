@@ -17,7 +17,7 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Variables de entorno secretas (Se configuran en Hugging Face Secrets)
+# Variables de entorno secretas (se configuran en Render)
 .env
 .env.local
 

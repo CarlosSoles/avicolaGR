@@ -13,7 +13,10 @@ from app.modules.agent.domain.schemas import (
     RoxiChatRequest,
     RoxiChatResponse,
 )
-from app.modules.agent.infrastructure.distances import get_farm_distance_km
+from app.modules.agent.infrastructure.distances import (
+    get_farm_distance_km,
+    distance_to_delivery_point,
+)
 from app.modules.agent.infrastructure.gemini_client import RoxiGeminiClient
 from app.modules.pecuaria.application.service import PecuariaService
 from app.modules.comercial.application.service import ComercialService
@@ -119,6 +122,62 @@ class RoxiAgentService:
 
         return MOCK_FARMS_INVENTORY
 
+    async def _get_farm_coordinates(self) -> Dict[str, tuple]:
+        """Coordenadas reales de las granjas (para calcular cercanía al punto de entrega)."""
+        if not self.db:
+            return {}
+        try:
+            from sqlalchemy import text as sql_text
+
+            res = await self.db.execute(
+                sql_text("""
+                    SELECT UPPER(code), latitude, longitude
+                    FROM public.farms
+                    WHERE is_active = TRUE AND latitude IS NOT NULL AND longitude IS NOT NULL
+                """)
+            )
+            return {
+                row[0]: (float(row[1]), float(row[2]))
+                for row in res.fetchall()
+            }
+        except Exception as e:
+            print(f"[ROXI] No se pudieron leer coordenadas de granjas: {e}")
+            return {}
+
+    async def _resolve_delivery_coords(self, req: RoxiRecommendRequest) -> Optional[tuple]:
+        """
+        Coordenadas del punto de entrega, con respaldo en el pedido y en la ficha del cliente
+        cuando la solicitud no las trae (pedidos antiguos o creados sin coordenadas).
+        """
+        if req.delivery_latitude is not None and req.delivery_longitude is not None:
+            return (req.delivery_latitude, req.delivery_longitude)
+
+        if not self.db or not req.order_id:
+            return None
+
+        try:
+            from sqlalchemy import text as sql_text
+
+            order = await ComercialService.get_order_by_id(req.order_id, db=self.db)
+            if order.delivery_latitude is not None and order.delivery_longitude is not None:
+                return (order.delivery_latitude, order.delivery_longitude)
+
+            if order.client_id:
+                row = (await self.db.execute(
+                    sql_text("""
+                        SELECT latitude, longitude FROM public.clients
+                        WHERE id = CAST(:cid AS uuid)
+                          AND latitude IS NOT NULL AND longitude IS NOT NULL
+                    """),
+                    {"cid": str(order.client_id)},
+                )).first()
+                if row:
+                    return (float(row[0]), float(row[1]))
+        except Exception as e:
+            print(f"[ROXI] No se pudieron resolver coordenadas del pedido: {e}")
+
+        return None
+
     async def recommend_barn(self, req: RoxiRecommendRequest) -> RoxiAllocationResponse:
         """
         Calcula y recomienda el galpón óptimo para una solicitud comercial dada.
@@ -131,6 +190,10 @@ class RoxiAgentService:
         min_w = req.min_weight
         max_w = req.max_weight
         zone = (req.zone_code or "CENTRO").upper().strip()
+
+        # Punto de entrega: solicitud → pedido → ficha del cliente
+        delivery_coords = await self._resolve_delivery_coords(req)
+        farm_coords = await self._get_farm_coordinates()
 
         # ======================================================================
         # FASE 1: FILTRO RÍGIDO DETERMINISTA (HARD CONSTRAINTS)
@@ -155,8 +218,13 @@ class RoxiAgentService:
             if b_weight < (min_w - 0.18) or b_weight > (max_w + 0.18):
                 continue
 
-            # 5. Cálculo de distancia vial real
-            dist_km = get_farm_distance_km(barn["farm_code"], zone)
+            # 5. Distancia real granja → punto de entrega (coordenadas si existen)
+            dist_km, dist_source = distance_to_delivery_point(
+                farm_coords.get((barn["farm_code"] or "").upper()),
+                delivery_coords,
+                barn["farm_code"],
+                zone,
+            )
 
             candidates.append({
                 "farm_code": barn["farm_code"],
@@ -167,14 +235,20 @@ class RoxiAgentService:
                 "available_balance": barn["available_birds"],
                 "sex": barn_sex,
                 "distance_km": dist_km,
+                "distance_source": dist_source,
             })
 
         # Si ningún galpón pasa el filtro rígido con tolerancia estricta,
-        # flexibilizar ventana de peso en 100g adicionales para no dejar la respuesta vacía
+        # se flexibiliza la ventana para no dejar la respuesta vacía
         if not candidates:
             for barn in live_inventory:
                 if barn.get("available_birds", 0) > 0:
-                    dist_km = get_farm_distance_km(barn["farm_code"], zone)
+                    dist_km, dist_source = distance_to_delivery_point(
+                        farm_coords.get((barn["farm_code"] or "").upper()),
+                        delivery_coords,
+                        barn["farm_code"],
+                        zone,
+                    )
                     candidates.append({
                         "farm_code": barn["farm_code"],
                         "farm_name": barn["farm_name"],
@@ -184,14 +258,15 @@ class RoxiAgentService:
                         "available_balance": barn.get("available_birds", 5000),
                         "sex": barn.get("sex", "INDISTINTO"),
                         "distance_km": dist_km,
+                        "distance_source": dist_source,
                     })
 
-        # Pre-ordenar candidatos priorizando edad > 45 días (urgente) y menor distancia km
+        # Pre-ordenar: primero edad crítica (>=45 días), luego cercanía al punto de entrega
         candidates.sort(
             key=lambda c: (
                 0 if c["current_age_days"] >= 45.0 else 1,
-                -c["current_age_days"],
                 c["distance_km"],
+                -c["current_age_days"],
             )
         )
         top_candidates = candidates[:5]
@@ -215,25 +290,24 @@ class RoxiAgentService:
         Reasigna un pedido existente cuando el galpón reservado sufre un imprevisto
         (descartes, mortandad o sobreventa).
         """
-        order = ComercialService.get_order_by_id(order_id)
-        if not order:
-            raise ValueError(f"No se encontró el pedido con ID {order_id}")
+        try:
+            order = await ComercialService.get_order_by_id(order_id, db=self.db)
+        except Exception as exc:
+            raise ValueError(f"No se encontró el pedido con ID {order_id}") from exc
 
-        delivery_date_str = (
-            order.target_delivery_date.isoformat()
-            if hasattr(order.target_delivery_date, "isoformat")
-            else str(order.target_delivery_date)
-        )
+        delivery_date_str = str(order.target_delivery_date)
 
         req = RoxiRecommendRequest(
             order_id=order.id,
-            client_name=order.client_business_name,
-            quantity_birds=order.quantity_birds,
-            sex=order.requested_sex,
-            min_weight=order.requested_weight_range_min,
-            max_weight=order.requested_weight_range_max,
+            client_name=order.client_name,
+            quantity_birds=order.requested_quantity,
+            sex=order.sex_preference or "INDISTINTO",
+            min_weight=order.min_weight_kg,
+            max_weight=order.max_weight_kg,
             zone_code=order.zone_code,
             delivery_address=order.delivery_address,
+            delivery_latitude=order.delivery_latitude,
+            delivery_longitude=order.delivery_longitude,
             scheduled_date=delivery_date_str,
             user_role="gestor_comercial",
         )

@@ -47,6 +47,7 @@ from app.shared.domain.exceptions import (
     SaldoNegativoException,
 )
 from app.shared.infrastructure.audit_logger import log_audit_event
+from app.shared.infrastructure.notifier import notify
 
 
 class PecuariaService:
@@ -218,7 +219,6 @@ class PecuariaService:
                 inventory.reserved_count = 0
                 inventory.sold_pending_count = 0
                 inventory.last_average_weight = None
-                inventory.available_count = dto.initial_count
             else:
                 inventory = BarnInventoryModel(
                     barn_id=dto.barn_id,
@@ -227,7 +227,6 @@ class PecuariaService:
                     specials_count=0,
                     reserved_count=0,
                     sold_pending_count=0,
-                    available_count=dto.initial_count,
                 )
                 db.add(inventory)
 
@@ -275,13 +274,8 @@ class PecuariaService:
                 raise DomainException("El galpón especificado no existe.")
 
             barn.status = "CERRADO"
-
-            inv_res = await db.execute(
-                select(BarnInventoryModel).where(BarnInventoryModel.barn_id == barn_id)
-            )
-            inv = inv_res.scalar_one_or_none()
-            if inv:
-                inv.available_count = 0
+            # El saldo disponible es columna generada: el cierre se refleja por estado,
+            # no modificando el inventario.
 
             await log_audit_event(
                 db=db,
@@ -387,6 +381,19 @@ class PecuariaService:
                 new_state={"average_weight": sample.average_weight, "sample_size": sample.actual_sample_size},
                 reason="Cierre de muestra de pesaje y actualización de peso promedio",
             )
+
+        await notify(
+            db,
+            category="pecuaria",
+            type="pesaje",
+            title=f"Pesaje registrado: {sample.actual_sample_size} aves",
+            description=(
+                f"Muestra completada con peso promedio {float(sample.average_weight):.2f} kg "
+                f"(min {float(sample.min_weight):.2f} / max {float(sample.max_weight):.2f})."
+            ),
+            target_roles=["supervisor_pecuario", "registrador_pecuario", "admin_sistema"],
+            badge="Pesaje",
+        )
 
         return WeighingSampleSummaryDTO(
             id=sample.id,
@@ -517,11 +524,11 @@ class PecuariaService:
                 reported_by_user_id=user_id,
             )
             db.add(finding)
+            await db.flush()  # necesario para que la auditoría tenga el ID
 
             # Acumular especiales encontrados
             inv.specials_count += dto.quantity
-            # available_count disminuye automáticamente
-            inv.available_count = inv.physical_count - inv.specials_count - inv.reserved_count - inv.sold_pending_count
+            # available_count se recalcula solo en la base de datos (columna generada)
             inv.version += 1
 
             # Alerta si colisiona con reservas existentes
@@ -538,6 +545,19 @@ class PecuariaService:
                 new_state={"quantity": dto.quantity, "new_total_specials": inv.specials_count},
                 reason=f"Registro de {dto.quantity} especiales encontrados en galpón",
             )
+
+        await notify(
+            db,
+            category="pecuaria",
+            type="especiales",
+            title=f"Especiales registrados: {dto.quantity} aves",
+            description=(
+                f"Se registraron {dto.quantity} aves especiales en el galpón. "
+                f"El saldo disponible fue ajustado automáticamente."
+            ),
+            target_roles=["supervisor_pecuario", "registrador_pecuario", "admin_sistema"],
+            badge="Especiales",
+        )
 
         return SpecialFindingDTO(
             id=finding.id,
@@ -587,8 +607,7 @@ class PecuariaService:
             elif dto.movement_type == "TRASLADO_INGRESO":
                 inv.physical_count += dto.quantity
 
-            # Recalcular disponible
-            inv.available_count = inv.physical_count - inv.specials_count - inv.reserved_count - inv.sold_pending_count
+            # El disponible se recalcula solo en la base de datos (columna generada)
             inv.version += 1
 
             movement = PhysicalMovementModel(
@@ -601,6 +620,7 @@ class PecuariaService:
                 performed_by_user_id=user_id,
             )
             db.add(movement)
+            await db.flush()  # necesario para que la auditoría tenga el ID
 
             await log_audit_event(
                 db=db,

@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     CheckConstraint,
+    Computed,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -114,9 +115,15 @@ class BarnInventoryModel(Base):
     reserved_count = Column(Integer, nullable=False, default=0)
     sold_pending_count = Column(Integer, nullable=False, default=0)
     
-    # available_count es columna generada en BD. En SQLAlchemy se define como solo lectura en inserts:
-    # available_count = physical_count - specials_count - reserved_count - sold_pending_count
-    available_count = Column(Integer, nullable=False)
+    # available_count es columna generada en BD (solo lectura)
+    available_count = Column(
+        Integer,
+        Computed(
+            "physical_count - specials_count - reserved_count - sold_pending_count",
+            persisted=True,
+        ),
+        nullable=False,
+    )
     
     last_average_weight = Column(Numeric(5, 3), nullable=True)  # Peso promedio (x̄) en kg
     version = Column(Integer, nullable=False, default=1)        # Control de concurrencia optimista

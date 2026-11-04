@@ -387,13 +387,26 @@ class AdminService:
 
         try:
             from sqlalchemy import text
-            await self.db.execute(
+            result = await self.db.execute(
                 text("UPDATE public.farms SET latitude = :lat, longitude = :lng WHERE UPPER(code) = :code"),
                 {"lat": lat, "lng": lng, "code": farm_code.upper()},
             )
+            if result.rowcount == 0:
+                await self.db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"La granja '{farm_code}' no existe en la base de datos.",
+                )
             await self.db.commit()
-        except Exception:
-            pass
+        except HTTPException:
+            raise
+        except Exception as e:
+            await self.db.rollback()
+            print(f"[AdminService] Error guardando coordenadas de {farm_code}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No se pudieron guardar las coordenadas en la base de datos. Intente nuevamente.",
+            )
 
         return FarmCatalogItem(
             name=matched["name"],

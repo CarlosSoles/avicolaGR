@@ -14,6 +14,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.modules.comercial.domain.schemas import (
     ClientCreate,
+    ClientUpdate,
     ClientResponse,
     OrderCreate,
     OrderActionRequest,
@@ -28,6 +29,7 @@ from app.modules.comercial.infrastructure.models import (
     OrderModel,
     TransportVehicleModel,
 )
+from app.shared.infrastructure.notifier import notify
 
 # Catálogo predeterminado de respaldo
 DEFAULT_CLIENTS = [
@@ -183,6 +185,7 @@ INITIAL_ORDERS = [
         "target_delivery_date": "2026-11-03",
         "requested_quantity": 4000,
         "allocated_quantity": 4000,
+        "density_birds_per_cage": 8,
         "min_weight_kg": 2.20,
         "max_weight_kg": 2.50,
         "sex_preference": "MACHO",
@@ -238,6 +241,8 @@ def _model_to_client_dict(model: ClientModel) -> Dict[str, Any]:
         "zone_code": model.zone_code,
         "address": model.address,
         "contact_phone": model.contact_phone,
+        "latitude": float(model.latitude) if model.latitude is not None else None,
+        "longitude": float(model.longitude) if model.longitude is not None else None,
         "preferred_min_weight": float(model.preferred_min_weight) if model.preferred_min_weight is not None else None,
         "preferred_max_weight": float(model.preferred_max_weight) if model.preferred_max_weight is not None else None,
         "is_active": model.is_active,
@@ -259,6 +264,7 @@ def _model_to_order_dict(model: OrderModel) -> Dict[str, Any]:
         "target_delivery_date": str(model.target_delivery_date),
         "requested_quantity": model.requested_quantity,
         "allocated_quantity": model.allocated_quantity or 0,
+        "density_birds_per_cage": model.density_birds_per_cage or 8,
         "min_weight_kg": float(model.min_weight_kg) if model.min_weight_kg is not None else 2.20,
         "max_weight_kg": float(model.max_weight_kg) if model.max_weight_kg is not None else 2.50,
         "sex_preference": model.sex_preference or "INDISTINTO",
@@ -353,16 +359,20 @@ class ComercialService:
     # =========================================================================
     @classmethod
     async def get_transport_vehicles(cls, db: Optional[AsyncSession] = None) -> List[TransportVehicle]:
-        """Obtiene la flota de transporte desde Supabase PostgreSQL o respaldo."""
-        if db:
+        """Obtiene la flota de transporte desde Supabase PostgreSQL."""
+        if db is not None:
             try:
                 res = await db.execute(select(TransportVehicleModel))
                 models = res.scalars().all()
-                if models:
-                    return [TransportVehicle(**_model_to_vehicle_dict(m)) for m in models]
+                return [TransportVehicle(**_model_to_vehicle_dict(m)) for m in models]
             except Exception as e:
                 print(f"[ComercialService] Error consultando vehículos en BD: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se pudo consultar la flota de transporte. Intente nuevamente.",
+                )
 
+        # Sin sesión de base de datos (pruebas unitarias)
         return [TransportVehicle(**v) for v in cls._vehicles_store]
 
     # =========================================================================
@@ -371,24 +381,27 @@ class ComercialService:
     @classmethod
     async def get_clients(cls, db: Optional[AsyncSession] = None) -> List[ClientResponse]:
         """Obtiene el catálogo de clientes autorizados desde Supabase PostgreSQL."""
-        if db:
+        if db is not None:
             try:
                 stmt = select(ClientModel).where(ClientModel.is_active == True).order_by(ClientModel.created_at.desc())
                 res = await db.execute(stmt)
                 db_clients = res.scalars().all()
-                if db_clients:
-                    # Actualizar caché en memoria
-                    cls._clients_store = [_model_to_client_dict(c) for c in db_clients]
-                    return [ClientResponse(**c) for c in cls._clients_store]
+                cls._clients_store = [_model_to_client_dict(c) for c in db_clients]
+                return [ClientResponse(**c) for c in cls._clients_store]
             except Exception as e:
                 print(f"[ComercialService] Error consultando clientes en BD: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se pudo consultar el catálogo de clientes. Intente nuevamente.",
+                )
 
+        # Sin sesión de base de datos (pruebas unitarias)
         return [ClientResponse(**c) for c in cls._clients_store]
 
     @classmethod
     async def create_client(cls, client_in: ClientCreate, db: Optional[AsyncSession] = None) -> ClientResponse:
         """Registra un nuevo cliente con persistencia garantizada en PostgreSQL."""
-        if db:
+        if db is not None:
             try:
                 # 1. Verificar unicidad de tax_id en BD
                 dup = await db.execute(select(ClientModel).where(ClientModel.tax_id == client_in.tax_id))
@@ -405,6 +418,8 @@ class ComercialService:
                     zone_code=client_in.zone_code,
                     address=client_in.address,
                     contact_phone=client_in.contact_phone,
+                    latitude=client_in.latitude,
+                    longitude=client_in.longitude,
                     preferred_min_weight=client_in.preferred_min_weight,
                     preferred_max_weight=client_in.preferred_max_weight,
                     is_active=client_in.is_active,
@@ -422,8 +437,12 @@ class ComercialService:
             except Exception as e:
                 print(f"[ComercialService] Error guardando cliente en BD: {e}")
                 await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se pudo guardar el cliente en la base de datos. Intente nuevamente.",
+                )
 
-        # Fallback en memoria si la BD no responde
+        # Sin sesión de base de datos (pruebas unitarias)
         if any(c["tax_id"] == client_in.tax_id for c in cls._clients_store):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -436,6 +455,8 @@ class ComercialService:
             "zone_code": client_in.zone_code,
             "address": client_in.address,
             "contact_phone": client_in.contact_phone,
+            "latitude": client_in.latitude,
+            "longitude": client_in.longitude,
             "preferred_min_weight": client_in.preferred_min_weight,
             "preferred_max_weight": client_in.preferred_max_weight,
             "is_active": client_in.is_active,
@@ -443,6 +464,91 @@ class ComercialService:
         }
         cls._clients_store.insert(0, new_client)
         return ClientResponse(**new_client)
+
+    @classmethod
+    async def update_client(
+        cls,
+        client_id: str,
+        client_in: ClientUpdate,
+        db: Optional[AsyncSession] = None,
+    ) -> ClientResponse:
+        """Actualiza la ficha de un cliente del catálogo (incluye dirección y coordenadas)."""
+        data = client_in.model_dump(exclude_unset=True)
+
+        # Normalizar textos y descartar cadenas vacías
+        for text_field in ("business_name", "tax_id", "zone_code"):
+            if text_field in data:
+                value = (data[text_field] or "").strip()
+                if value:
+                    data[text_field] = value
+                else:
+                    data.pop(text_field)
+
+        if db:
+            try:
+                client_uuid: Optional[UUID]
+                try:
+                    client_uuid = UUID(client_id)
+                except (ValueError, TypeError):
+                    client_uuid = None
+
+                if client_uuid:
+                    stmt = select(ClientModel).where(
+                        or_(ClientModel.id == client_uuid, ClientModel.tax_id == client_id)
+                    )
+                else:
+                    stmt = select(ClientModel).where(ClientModel.tax_id == client_id)
+
+                res = await db.execute(stmt)
+                model = res.scalar_one_or_none()
+
+                if model:
+                    # Verificar unicidad del RUC/DNI si cambió
+                    new_tax_id = data.get("tax_id")
+                    if new_tax_id and new_tax_id != model.tax_id:
+                        dup = await db.execute(
+                            select(ClientModel).where(
+                                ClientModel.tax_id == new_tax_id,
+                                ClientModel.id != model.id,
+                            )
+                        )
+                        if dup.scalar_one_or_none():
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Ya existe otro cliente registrado con el RUC/DNI '{new_tax_id}'.",
+                            )
+
+                    for field, value in data.items():
+                        setattr(model, field, value)
+
+                    await db.commit()
+                    await db.refresh(model)
+
+                    client_dict = _model_to_client_dict(model)
+                    for idx, cached in enumerate(cls._clients_store):
+                        if cached["id"] == client_dict["id"]:
+                            cls._clients_store[idx] = client_dict
+                            break
+                    else:
+                        cls._clients_store.insert(0, client_dict)
+
+                    return ClientResponse(**client_dict)
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[ComercialService] Error actualizando cliente en BD: {e}")
+                await db.rollback()
+
+        # Respaldo en memoria
+        for cached in cls._clients_store:
+            if cached["id"] == client_id or cached["tax_id"] == client_id:
+                cached.update(data)
+                return ClientResponse(**cached)
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Cliente '{client_id}' no encontrado.",
+        )
 
     # =========================================================================
     # PEDIDOS Y PROGRAMACIÓN
@@ -456,7 +562,7 @@ class ComercialService:
         db: Optional[AsyncSession] = None,
     ) -> List[OrderResponse]:
         """Lista los pedidos registrados desde la base de datos PostgreSQL."""
-        if db:
+        if db is not None:
             try:
                 stmt = select(OrderModel).order_by(OrderModel.target_delivery_date.desc(), OrderModel.created_at.desc())
                 if status_filter:
@@ -468,12 +574,16 @@ class ComercialService:
 
                 res = await db.execute(stmt)
                 db_orders = res.scalars().all()
-                if db_orders:
-                    return [OrderResponse(**_model_to_order_dict(o)) for o in db_orders]
+                # La base de datos es la única fuente de verdad: si no hay pedidos, se devuelve vacío.
+                return [OrderResponse(**_model_to_order_dict(o)) for o in db_orders]
             except Exception as e:
                 print(f"[ComercialService] Error listando pedidos en BD: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se pudo consultar los pedidos. Intente nuevamente.",
+                )
 
-        # Fallback en memoria
+        # Sin sesión de base de datos (pruebas unitarias)
         orders = cls._orders_store
         if status_filter:
             orders = [o for o in orders if o["status"] == status_filter]
@@ -538,9 +648,10 @@ class ComercialService:
             )
 
         initial_status = "BORRADOR" if order_in.is_draft else "REGISTRADO"
+        density = order_in.density_birds_per_cage or 8
         avg_weight = (order_in.min_weight_kg + order_in.max_weight_kg) / 2.0
         est_kg = round(order_in.requested_quantity * avg_weight, 2)
-        est_cages = (order_in.requested_quantity + 7) // 8
+        est_cages = int(math.ceil(order_in.requested_quantity / density))
 
         seller_full_name = getattr(order_in, "seller_full_name", None)
         if not seller_full_name:
@@ -562,8 +673,8 @@ class ComercialService:
             "description": f"Pedido registrado formalmente por Comercial para {order_in.requested_quantity:,} aves.",
         }
 
-        # Intentar persistencia en BD
-        if db:
+        # Persistencia en la base de datos (única fuente de verdad)
+        if db is not None:
             try:
                 # Contar pedidos para el secuencial
                 cnt_res = await db.execute(select(func.count(OrderModel.id)))
@@ -603,6 +714,7 @@ class ComercialService:
                     status=initial_status,
                     requested_quantity=order_in.requested_quantity,
                     allocated_quantity=0,
+                    density_birds_per_cage=density,
                     min_weight_kg=round(order_in.min_weight_kg, 2),
                     max_weight_kg=round(order_in.max_weight_kg, 2),
                     sex_preference=order_in.sex_preference or "INDISTINTO",
@@ -626,14 +738,33 @@ class ComercialService:
                 await db.commit()
                 await db.refresh(new_order_model)
 
+                await notify(
+                    db,
+                    category="gestion_comercial",
+                    type="aprobacion",
+                    title=f"Nuevo pedido {new_order_model.order_number}",
+                    description=(
+                        f"{new_order_model.client_name} solicitó "
+                        f"{new_order_model.requested_quantity:,} aves para el "
+                        f"{order_in.target_delivery_date} (zona {new_order_model.zone_code})."
+                    ),
+                    target_roles=["gestor_comercial", "gerente_comercial", "admin_sistema"],
+                    order_id=new_order_model.id,
+                    badge="Pedido nuevo",
+                )
+
                 order_dict = _model_to_order_dict(new_order_model)
                 cls._orders_store.insert(0, order_dict)
                 return OrderResponse(**order_dict)
             except Exception as e:
                 print(f"[ComercialService] Error guardando pedido en BD: {e}")
                 await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se pudo guardar el pedido en la base de datos. Intente nuevamente.",
+                )
 
-        # Respaldo en memoria
+        # Sin sesión de base de datos (pruebas unitarias)
         cls._order_counter += 1
         order_num = f"PED-2026-{str(cls._order_counter).zfill(3)}"
         new_order = {
@@ -649,6 +780,7 @@ class ComercialService:
             "target_delivery_date": order_in.target_delivery_date,
             "requested_quantity": order_in.requested_quantity,
             "allocated_quantity": 0,
+            "density_birds_per_cage": density,
             "min_weight_kg": round(order_in.min_weight_kg, 2),
             "max_weight_kg": round(order_in.max_weight_kg, 2),
             "sex_preference": getattr(order_in, "sex_preference", "INDISTINTO") or "INDISTINTO",
@@ -672,6 +804,173 @@ class ComercialService:
         }
         cls._orders_store.insert(0, new_order)
         return OrderResponse(**new_order)
+
+    # =========================================================================
+    # INVENTARIO: RESERVA COMERCIAL Y DESPACHO FÍSICO
+    # =========================================================================
+    @staticmethod
+    def _barn_number(barn_code: Optional[str]) -> Optional[int]:
+        if not barn_code:
+            return None
+        digits = "".join(ch for ch in barn_code if ch.isdigit())
+        return int(digits) if digits else None
+
+    @classmethod
+    async def _lock_inventory(cls, db: AsyncSession, farm_code: Optional[str], barn_code: Optional[str]):
+        """Bloquea la fila de inventario del galpón para operar de forma atómica."""
+        barn_number = cls._barn_number(barn_code)
+        if not farm_code or barn_number is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Debe indicar una granja y un galpón válidos para operar el inventario.",
+            )
+
+        row = (await db.execute(
+            text("""
+                SELECT bi.barn_id, bi.available_count, bi.reserved_count,
+                       bi.current_batch_id, bi.physical_count, bi.specials_count
+                FROM public.barn_inventories bi
+                JOIN public.barns b ON b.id = bi.barn_id
+                JOIN public.farms f ON f.id = b.farm_id
+                WHERE UPPER(f.code) = :farm AND b.barn_number = :num
+                FOR UPDATE OF bi
+            """),
+            {"farm": farm_code.upper(), "num": barn_number},
+        )).first()
+
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No hay inventario registrado para la granja {farm_code} galpón {barn_code}.",
+            )
+        return row
+
+    @classmethod
+    async def _reserve_stock(
+        cls,
+        db: AsyncSession,
+        farm_code: Optional[str],
+        barn_code: Optional[str],
+        quantity: int,
+        force: bool = False,
+        user_role: str = "",
+    ) -> None:
+        """Reserva aves del galpón (reserved_count) validando el saldo disponible."""
+        if quantity <= 0:
+            return
+
+        row = await cls._lock_inventory(db, farm_code, barn_code)
+        available = int(row[1])
+        reserved = int(row[2])
+        physical = int(row[4])
+        specials = int(row[5])
+
+        if available < quantity:
+            if not force:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Saldo insuficiente en {farm_code} {barn_code}: "
+                        f"{available:,} disponibles vs {quantity:,} solicitadas."
+                    ),
+                )
+            if user_role not in ("admin_sistema", "gerente_comercial"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Solo el Administrador o el Gerente Comercial pueden forzar una reserva sin saldo.",
+                )
+            # Ni forzando se puede reservar más que el stock físico vendible
+            if reserved + quantity > physical - specials:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"La reserva forzada supera el stock físico de {farm_code} {barn_code}: "
+                        f"máximo reservable {physical - specials:,} aves."
+                    ),
+                )
+
+        await db.execute(
+            text("""
+                UPDATE public.barn_inventories
+                SET reserved_count = reserved_count + :qty,
+                    version = version + 1,
+                    updated_at = NOW()
+                WHERE barn_id = :barn
+            """),
+            {"qty": quantity, "barn": row[0]},
+        )
+
+    @classmethod
+    async def _release_stock(
+        cls,
+        db: AsyncSession,
+        farm_code: Optional[str],
+        barn_code: Optional[str],
+        quantity: int,
+    ) -> None:
+        """Libera una reserva previa (cancelación o reasignación)."""
+        if quantity <= 0 or not farm_code:
+            return
+
+        row = await cls._lock_inventory(db, farm_code, barn_code)
+        await db.execute(
+            text("""
+                UPDATE public.barn_inventories
+                SET reserved_count = GREATEST(reserved_count - :qty, 0),
+                    version = version + 1,
+                    updated_at = NOW()
+                WHERE barn_id = :barn
+            """),
+            {"qty": quantity, "barn": row[0]},
+        )
+
+    @classmethod
+    async def _dispatch_stock(
+        cls,
+        db: AsyncSession,
+        order: "OrderModel",
+        user_id: Optional[UUID],
+    ) -> None:
+        """
+        Saca física: el ave sale de granja. Baja el conteo físico y libera la reserva
+        en la misma operación, dejando el movimiento registrado.
+        """
+        quantity = order.allocated_quantity or 0
+        if quantity <= 0 or not order.assigned_farm_code:
+            return
+
+        row = await cls._lock_inventory(db, order.assigned_farm_code, order.assigned_barn_code)
+
+        await db.execute(
+            text("""
+                UPDATE public.barn_inventories
+                SET physical_count = GREATEST(physical_count - :qty, 0),
+                    reserved_count = GREATEST(reserved_count - :qty, 0),
+                    version = version + 1,
+                    updated_at = NOW()
+                WHERE barn_id = :barn
+            """),
+            {"qty": quantity, "barn": row[0]},
+        )
+
+        if user_id:
+            await db.execute(
+                text("""
+                    INSERT INTO public.physical_movements
+                        (batch_id, barn_id, movement_type, quantity, notes,
+                         performed_by_user_id, movement_date)
+                    VALUES
+                        (:batch, :barn, 'SACA_DESPACHO', :qty, :notes,
+                         CAST(:uid AS uuid), CURRENT_DATE)
+                """),
+                {
+                    "batch": row[3],
+                    "barn": row[0],
+                    "qty": quantity,
+                    "notes": f"Saca automática del pedido {order.order_number}",
+                    "uid": str(user_id),
+                },
+            )
 
     # =========================================================================
     # APROBACIÓN, OBSERVACIÓN Y CANCELACIÓN (GESTOR COMERCIAL)
@@ -710,11 +1009,33 @@ class ComercialService:
                     farm_to_assign = action_req.farm_code or m.suggested_farm_code or "TRAD1"
                     barn_to_assign = action_req.barn_code or m.suggested_barn_code or "G-01"
                     qty_to_assign = action_req.allocated_quantity or m.requested_quantity
+                    previous_density = m.density_birds_per_cage or 8
+                    density_to_apply = action_req.density_birds_per_cage or previous_density
+                    avg_weight = (float(m.min_weight_kg) + float(m.max_weight_kg)) / 2.0
+
+                    # Inventario: liberar reserva previa (si se re-aprueba) y reservar la nueva
+                    if m.status == "APROBADO_RESERVADO" and m.allocated_quantity and m.assigned_farm_code:
+                        await cls._release_stock(
+                            db, m.assigned_farm_code, m.assigned_barn_code, m.allocated_quantity
+                        )
+
+                    await cls._reserve_stock(
+                        db,
+                        farm_to_assign,
+                        barn_to_assign,
+                        qty_to_assign,
+                        force=action_req.force_reservation,
+                        user_role=user_role,
+                    )
 
                     m.status = "APROBADO_RESERVADO"
                     m.assigned_farm_code = farm_to_assign
                     m.assigned_barn_code = barn_to_assign
                     m.allocated_quantity = qty_to_assign
+                    m.density_birds_per_cage = density_to_apply
+                    # Jaulas y tonelaje se recalculan sobre la cantidad realmente asignada
+                    m.estimated_cages = int(math.ceil(qty_to_assign / density_to_apply))
+                    m.estimated_total_kg = round(qty_to_assign * avg_weight, 2)
                     m.gestor_username = gestor_username
                     m.gestor_observation = action_req.observation or f"Aprobación formal por {gestor_username}. Galpón [{barn_to_assign}] de [{farm_to_assign}] con {qty_to_assign:,} aves reservadas."
                     m.updated_at = datetime.utcnow()
@@ -727,13 +1048,40 @@ class ComercialService:
                         "actor_username": gestor_username,
                         "actor_role": user_role,
                         "timestamp": datetime.utcnow().isoformat() + "Z",
-                        "description": f"Aprobación formal confirmada en {farm_to_assign} ({barn_to_assign}) por {qty_to_assign:,} aves.",
+                        "description": f"Aprobación formal confirmada en {farm_to_assign} ({barn_to_assign}) por {qty_to_assign:,} aves a {density_to_apply} aves/jaula ({m.estimated_cages:,} jaulas).",
                     })
+                    if density_to_apply != previous_density:
+                        current_log.append({
+                            "id": f"log-{uuid4().hex[:6]}",
+                            "action": "DENSIDAD_AJUSTADA",
+                            "actor_username": gestor_username,
+                            "actor_role": user_role,
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "description": f"Densidad ajustada de {previous_density} a {density_to_apply} aves/jaula al aprobar el pedido.",
+                            "details": {"previous_density": previous_density, "new_density": density_to_apply},
+                        })
                     m.audit_log = current_log
                     flag_modified(m, "audit_log")
 
                     await db.commit()
                     await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="aprobado",
+                        title=f"Pedido {m.order_number} aprobado",
+                        description=(
+                            f"El Gestor Comercial aprobó tu pedido y reservó "
+                            f"{qty_to_assign:,} aves en {farm_to_assign} ({barn_to_assign}) "
+                            f"a {density_to_apply} aves/jaula."
+                        ),
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="Aprobado",
+                    )
+
                     order_dict = _model_to_order_dict(m)
                     return OrderResponse(**order_dict)
             except HTTPException:
@@ -755,11 +1103,17 @@ class ComercialService:
         farm_to_assign = action_req.farm_code or target_order.get("suggested_farm_code") or "TRAD1"
         barn_to_assign = action_req.barn_code or target_order.get("suggested_barn_code") or "G-01"
         qty_to_assign = action_req.allocated_quantity or target_order["requested_quantity"]
+        previous_density = target_order.get("density_birds_per_cage") or 8
+        density_to_apply = action_req.density_birds_per_cage or previous_density
+        avg_weight = (float(target_order["min_weight_kg"]) + float(target_order["max_weight_kg"])) / 2.0
 
         target_order["status"] = "APROBADO_RESERVADO"
         target_order["assigned_farm_code"] = farm_to_assign
         target_order["assigned_barn_code"] = barn_to_assign
         target_order["allocated_quantity"] = qty_to_assign
+        target_order["density_birds_per_cage"] = density_to_apply
+        target_order["estimated_cages"] = int(math.ceil(qty_to_assign / density_to_apply))
+        target_order["estimated_total_kg"] = round(qty_to_assign * avg_weight, 2)
         target_order["gestor_username"] = gestor_username
         target_order["gestor_observation"] = action_req.observation or f"Aprobación formal por {gestor_username}."
         target_order["updated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -768,8 +1122,17 @@ class ComercialService:
             action="APROBADO_RESERVADO",
             actor_username=gestor_username,
             actor_role=user_role,
-            description=f"Aprobación confirmada en {farm_to_assign} ({barn_to_assign}) por {qty_to_assign:,} aves.",
+            description=f"Aprobación confirmada en {farm_to_assign} ({barn_to_assign}) por {qty_to_assign:,} aves a {density_to_apply} aves/jaula.",
         )
+        if density_to_apply != previous_density:
+            cls._add_audit_log(
+                target_order,
+                action="DENSIDAD_AJUSTADA",
+                actor_username=gestor_username,
+                actor_role=user_role,
+                description=f"Densidad ajustada de {previous_density} a {density_to_apply} aves/jaula al aprobar.",
+                details={"previous_density": previous_density, "new_density": density_to_apply},
+            )
         return OrderResponse(**target_order)
 
     dar_ok_pedido = aprobar_pedido
@@ -821,6 +1184,19 @@ class ComercialService:
 
                     await db.commit()
                     await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="observacion",
+                        title=f"Pedido {m.order_number} con observación",
+                        description=f"El Gestor Comercial devolvió tu pedido: {action_req.observation}",
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="Acción requerida",
+                    )
+
                     return OrderResponse(**_model_to_order_dict(m))
             except Exception as e:
                 print(f"[ComercialService] Error observando pedido en BD: {e}")
@@ -856,6 +1232,12 @@ class ComercialService:
                 res = await db.execute(stmt)
                 m = res.scalar_one_or_none()
                 if m:
+                    # Liberar la reserva si el pedido estaba aprobado
+                    if m.status == "APROBADO_RESERVADO" and m.allocated_quantity and m.assigned_farm_code:
+                        await cls._release_stock(
+                            db, m.assigned_farm_code, m.assigned_barn_code, m.allocated_quantity
+                        )
+
                     m.status = "CANCELADO"
                     m.notes = f"{m.notes or ''} [Cancelado: {reason or 'Sin motivo'}]".strip()
                     m.updated_at = datetime.utcnow()
@@ -906,15 +1288,26 @@ class ComercialService:
                 res = await db.execute(stmt)
                 m = res.scalar_one_or_none()
                 if m:
+                    # Enriquecer con los datos de la unidad seleccionada
+                    vehicle = None
+                    if transport_req.vehicle_id:
+                        v_res = await db.execute(
+                            select(TransportVehicleModel).where(TransportVehicleModel.id == transport_req.vehicle_id)
+                        )
+                        vehicle = v_res.scalar_one_or_none()
+
+                    plate = transport_req.plate or (vehicle.plate if vehicle else None)
+                    driver_name = transport_req.driver_name or (vehicle.driver_name if vehicle else None)
+
                     m.transport_assigned = True
-                    m.transport_truck_id = transport_req.truck_id
-                    m.transport_plate = transport_req.plate
-                    m.transport_model = transport_req.model
-                    m.transport_driver_name = transport_req.driver_name
-                    m.transport_driver_phone = transport_req.driver_phone
-                    m.transport_crew = transport_req.crew
+                    m.transport_truck_id = transport_req.vehicle_id
+                    m.transport_plate = plate
+                    m.transport_model = vehicle.model if vehicle else None
+                    m.transport_driver_name = driver_name
+                    m.transport_driver_phone = transport_req.driver_phone or (vehicle.driver_phone if vehicle else None)
+                    m.transport_crew = transport_req.crew_name or (vehicle.default_crew if vehicle else None)
                     m.transport_shift = transport_req.shift
-                    m.transport_capacity_cages = transport_req.capacity_cages
+                    m.transport_capacity_cages = vehicle.capacity_cages if vehicle else None
                     m.transport_notes = transport_req.transport_notes
                     m.transport_assigned_at = now_dt
                     m.transport_assigned_by = gestor_username
@@ -930,13 +1323,30 @@ class ComercialService:
                         "actor_username": gestor_username,
                         "actor_role": user_role,
                         "timestamp": now_str,
-                        "description": f"Unidad {transport_req.plate} designada a {transport_req.driver_name}.",
+                        "description": f"Unidad {plate or transport_req.vehicle_id} designada a {driver_name or 'conductor asignado'}.",
                     })
                     m.audit_log = current_log
                     flag_modified(m, "audit_log")
 
                     await db.commit()
                     await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="entrega",
+                        title=f"Transporte asignado a {m.order_number}",
+                        description=(
+                            f"Unidad {plate or transport_req.vehicle_id}"
+                            f"{(' · ' + driver_name) if driver_name else ''} asignada. "
+                            f"Carga prevista: {m.loading_slot_time or 'por confirmar'}."
+                        ),
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="En ruta",
+                    )
+
                     return OrderResponse(**_model_to_order_dict(m))
             except Exception as e:
                 print(f"[ComercialService] Error asignando transporte en BD: {e}")
@@ -944,18 +1354,22 @@ class ComercialService:
 
         for o in cls._orders_store:
             if o["id"] == order_id or o["order_number"] == order_id:
+                cached_vehicle = next(
+                    (v for v in cls._vehicles_store if v["id"] == transport_req.vehicle_id),
+                    None,
+                )
                 o["transport_assigned"] = True
-                o["transport_truck_id"] = transport_req.truck_id
-                o["transport_plate"] = transport_req.plate
-                o["transport_driver_name"] = transport_req.driver_name
-                o["transport_driver_phone"] = transport_req.driver_phone
-                o["transport_crew"] = transport_req.crew
+                o["transport_truck_id"] = transport_req.vehicle_id
+                o["transport_plate"] = transport_req.plate or (cached_vehicle["plate"] if cached_vehicle else None)
+                o["transport_driver_name"] = transport_req.driver_name or (cached_vehicle["driver_name"] if cached_vehicle else None)
+                o["transport_driver_phone"] = transport_req.driver_phone or (cached_vehicle["driver_phone"] if cached_vehicle else None)
+                o["transport_crew"] = transport_req.crew_name or (cached_vehicle["default_crew"] if cached_vehicle else None)
                 o["transport_shift"] = transport_req.shift
                 o["transport_assigned_at"] = now_str
                 o["transport_assigned_by"] = gestor_username
                 o["dispatch_phase"] = "TRANSPORTE_ASIGNADO"
                 o["updated_at"] = now_str
-                cls._add_audit_log(o, action="TRANSPORTE_ASIGNADO", actor_username=gestor_username, actor_role=user_role, description=f"Unidad {transport_req.plate} asignada.")
+                cls._add_audit_log(o, action="TRANSPORTE_ASIGNADO", actor_username=gestor_username, actor_role=user_role, description=f"Unidad {o['transport_plate']} asignada.")
                 return OrderResponse(**o)
 
         raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
@@ -1012,6 +1426,7 @@ class ComercialService:
         dispatch_phase: str,
         notes: Optional[str] = None,
         db: Optional[AsyncSession] = None,
+        user_id: Optional[UUID] = None,
     ) -> OrderResponse:
         """Actualiza la fase de despacho (Tracking GPS / Despacho en Ruta)."""
         valid_phases = ["TRANSPORTE_ASIGNADO", "EN_GRANJA_CARGANDO", "EN_TRANSITO", "ENTREGADO_CONFORME"]
@@ -1032,11 +1447,16 @@ class ComercialService:
                 res = await db.execute(stmt)
                 m = res.scalar_one_or_none()
                 if m:
+                    previous_phase = m.dispatch_phase
                     m.dispatch_phase = dispatch_phase
                     m.dispatch_phase_updated_at = now_dt
                     m.updated_at = now_dt
                     if dispatch_phase == "ENTREGADO_CONFORME":
                         m.status = "DESPACHADO"
+
+                    # Saca física: al salir de granja bajan el físico y la reserva
+                    if dispatch_phase == "EN_TRANSITO" and previous_phase != "EN_TRANSITO":
+                        await cls._dispatch_stock(db, m, user_id)
 
                     current_log = list(m.audit_log or [])
                     current_log.append({
@@ -1052,6 +1472,28 @@ class ComercialService:
 
                     await db.commit()
                     await db.refresh(m)
+
+                    if dispatch_phase in ("EN_TRANSITO", "ENTREGADO_CONFORME"):
+                        await notify(
+                            db,
+                            category="comercial",
+                            type="entrega",
+                            title=(
+                                f"{m.order_number} entregado"
+                                if dispatch_phase == "ENTREGADO_CONFORME"
+                                else f"{m.order_number} en tránsito"
+                            ),
+                            description=(
+                                f"El transporte del pedido de {m.client_name} "
+                                + ("llegó a destino." if dispatch_phase == "ENTREGADO_CONFORME"
+                                   else "salió de granja y va en ruta.")
+                            ),
+                            target_roles=["vendedor"],
+                            target_user_id=m.seller_user_id,
+                            order_id=m.id,
+                            badge="Entrega",
+                        )
+
                     return OrderResponse(**_model_to_order_dict(m))
             except Exception as e:
                 print(f"[ComercialService] Error actualizando fase en BD: {e}")
@@ -1069,13 +1511,110 @@ class ComercialService:
         raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
 
     @classmethod
+    async def update_order_density(
+        cls,
+        order_id: str,
+        density_birds_per_cage: int,
+        user_role: str,
+        username: str,
+        db: Optional[AsyncSession] = None,
+    ) -> OrderResponse:
+        """Ajusta la densidad de carga (aves por jaula) mientras el despacho no esté en tránsito."""
+        allowed_roles = ["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"]
+        if user_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tiene permisos para ajustar la densidad del pedido.",
+            )
+
+        blocked_phases = ("EN_TRANSITO", "ENTREGADO_CONFORME")
+        now_dt = datetime.utcnow()
+        now_str = now_dt.isoformat() + "Z"
+
+        if db:
+            try:
+                try:
+                    uuid_val = UUID(order_id)
+                    stmt = select(OrderModel).where(or_(OrderModel.id == uuid_val, OrderModel.order_number == order_id))
+                except Exception:
+                    stmt = select(OrderModel).where(OrderModel.order_number == order_id)
+
+                res = await db.execute(stmt)
+                m = res.scalar_one_or_none()
+                if m:
+                    if m.dispatch_phase in blocked_phases:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="La densidad ya no puede modificarse: el despacho está en tránsito o entregado.",
+                        )
+
+                    previous_density = m.density_birds_per_cage or 8
+                    qty = m.allocated_quantity or m.requested_quantity or 0
+                    m.density_birds_per_cage = density_birds_per_cage
+                    m.estimated_cages = int(math.ceil(qty / density_birds_per_cage))
+                    m.updated_at = now_dt
+
+                    if density_birds_per_cage != previous_density:
+                        current_log = list(m.audit_log or [])
+                        current_log.append({
+                            "id": f"log-{uuid4().hex[:6]}",
+                            "action": "DENSIDAD_AJUSTADA",
+                            "actor_username": username,
+                            "actor_role": user_role,
+                            "timestamp": now_str,
+                            "description": f"Densidad de carga ajustada de {previous_density} a {density_birds_per_cage} aves/jaula ({qty:,} aves → {m.estimated_cages:,} jaulas).",
+                            "details": {"previous_density": previous_density, "new_density": density_birds_per_cage},
+                        })
+                        m.audit_log = current_log
+                        flag_modified(m, "audit_log")
+
+                    await db.commit()
+                    await db.refresh(m)
+                    return OrderResponse(**_model_to_order_dict(m))
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[ComercialService] Error ajustando densidad en BD: {e}")
+                await db.rollback()
+
+        for o in cls._orders_store:
+            if o["id"] == order_id or o["order_number"] == order_id:
+                if o.get("dispatch_phase") in blocked_phases:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="La densidad ya no puede modificarse: el despacho está en tránsito o entregado.",
+                    )
+                previous_density = o.get("density_birds_per_cage") or 8
+                qty = o.get("allocated_quantity") or o.get("requested_quantity") or 0
+                o["density_birds_per_cage"] = density_birds_per_cage
+                o["estimated_cages"] = int(math.ceil(qty / density_birds_per_cage))
+                o["updated_at"] = now_str
+                if density_birds_per_cage != previous_density:
+                    cls._add_audit_log(
+                        o,
+                        action="DENSIDAD_AJUSTADA",
+                        actor_username=username,
+                        actor_role=user_role,
+                        description=f"Densidad ajustada de {previous_density} a {density_birds_per_cage} aves/jaula.",
+                        details={"previous_density": previous_density, "new_density": density_birds_per_cage},
+                    )
+                return OrderResponse(**o)
+
+        raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
+
+    @classmethod
     async def get_programacion_transporte(
         cls,
         delivery_date: Optional[str] = None,
         db: Optional[AsyncSession] = None,
+        seller_username: Optional[str] = None,
     ) -> ProgramacionTransporteResponse:
         """Genera la Hoja de Programación de Transporte desde pedidos aprobados en PostgreSQL."""
-        orders_data: List[OrderResponse] = await cls.get_orders(status_filter="APROBADO_RESERVADO", db=db)
+        orders_data: List[OrderResponse] = await cls.get_orders(
+            status_filter="APROBADO_RESERVADO",
+            seller_username=seller_username,
+            db=db,
+        )
         if delivery_date:
             orders_data = [o for o in orders_data if o.target_delivery_date == delivery_date]
 
@@ -1086,7 +1625,8 @@ class ComercialService:
 
         for o in orders_data:
             allocated = o.allocated_quantity or o.requested_quantity or 0
-            cages = o.estimated_cages or int(math.ceil(allocated / 8.0))
+            density = o.density_birds_per_cage or 8
+            cages = o.estimated_cages or int(math.ceil(allocated / density))
             order_kg = o.estimated_total_kg or round(allocated * ((o.min_weight_kg + o.max_weight_kg) / 2.0), 2)
             tons = round(order_kg / 1000.0, 2)
 
@@ -1105,6 +1645,7 @@ class ComercialService:
                     assigned_farm_code=o.assigned_farm_code or "POR ASIGNAR",
                     assigned_barn_code=o.assigned_barn_code or "POR ASIGNAR",
                     allocated_quantity=allocated,
+                    density_birds_per_cage=density,
                     estimated_cages=cages,
                     estimated_total_kg=order_kg,
                     estimated_tons=tons,

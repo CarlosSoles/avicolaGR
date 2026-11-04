@@ -24,6 +24,8 @@ class ClientBase(BaseModel):
     zone_code: str = Field(..., description="Zona habitual de entrega (ej: NORTE, CENTRO, SUR, METROPOLITANA)")
     address: Optional[str] = Field(None, description="Dirección o punto de entrega")
     contact_phone: Optional[str] = Field(None, description="Teléfono de contacto")
+    latitude: Optional[float] = Field(None, ge=-90, le=90, description="Latitud WGS84 del punto de entrega habitual")
+    longitude: Optional[float] = Field(None, ge=-180, le=180, description="Longitud WGS84 del punto de entrega habitual")
     preferred_min_weight: Optional[float] = Field(None, description="Peso mínimo preferente en kg")
     preferred_max_weight: Optional[float] = Field(None, description="Peso máximo preferente en kg")
     is_active: bool = True
@@ -31,6 +33,21 @@ class ClientBase(BaseModel):
 
 class ClientCreate(ClientBase):
     pass
+
+
+class ClientUpdate(BaseModel):
+    """Actualización parcial de la ficha del cliente (solo se aplican los campos enviados)."""
+
+    business_name: Optional[str] = None
+    tax_id: Optional[str] = None
+    zone_code: Optional[str] = None
+    address: Optional[str] = None
+    contact_phone: Optional[str] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    preferred_min_weight: Optional[float] = None
+    preferred_max_weight: Optional[float] = None
+    is_active: Optional[bool] = None
 
 
 class ClientResponse(ClientBase):
@@ -46,6 +63,12 @@ class OrderCreate(BaseModel):
     zone_code: str = Field("METROPOLITANA", description="Zona comercial de entrega")
     target_delivery_date: str = Field(..., description="Fecha requerida de entrega (YYYY-MM-DD)")
     requested_quantity: int = Field(..., gt=0, description="Cantidad total de aves solicitadas")
+    density_birds_per_cage: int = Field(
+        8,
+        ge=7,
+        le=12,
+        description="Densidad de carga en aves por jaula (7-12). Define cuántas jaulas requiere el pedido.",
+    )
     min_weight_kg: float = Field(..., gt=0, description="Peso mínimo requerido en kg")
     max_weight_kg: float = Field(..., gt=0, description="Peso máximo requerido en kg")
     sex_preference: str = Field("INDISTINTO", description="Preferencia de sexo: MACHO, HEMBRA o INDISTINTO")
@@ -64,8 +87,23 @@ class OrderActionRequest(BaseModel):
     farm_code: Optional[str] = Field(None, description="Código de granja asignada formalmente")
     barn_code: Optional[str] = Field(None, description="Código de galpón asignado formalmente")
     allocated_quantity: Optional[int] = Field(None, description="Cantidad de aves reservadas de este galpón")
+    density_birds_per_cage: Optional[int] = Field(
+        None,
+        ge=7,
+        le=12,
+        description="Ajuste de la densidad de carga (aves por jaula) al momento de aprobar",
+    )
+    force_reservation: bool = Field(
+        False,
+        description="Permite reservar aunque el saldo del galpón sea insuficiente (solo admin/gerente)",
+    )
+    force_reason: Optional[str] = Field(None, description="Motivo de la reserva forzada")
     split_remaining: bool = Field(False, description="Genera automáticamente una orden fraccionada con el saldo restante")
     split_delivery_date: Optional[str] = Field(None, description="Fecha de entrega para el saldo restante fraccionado")
+
+
+class UpdateDensityRequest(BaseModel):
+    density_birds_per_cage: int = Field(..., ge=7, le=12, description="Nueva densidad de carga en aves por jaula")
 
 
 class OrderResponse(BaseModel):
@@ -81,6 +119,7 @@ class OrderResponse(BaseModel):
     target_delivery_date: str
     requested_quantity: int
     allocated_quantity: int
+    density_birds_per_cage: int = 8
     min_weight_kg: float
     max_weight_kg: float
     sex_preference: str = "INDISTINTO"
@@ -171,6 +210,7 @@ class ProgramacionTransporteItem(BaseModel):
     assigned_farm_code: str
     assigned_barn_code: str
     allocated_quantity: int
+    density_birds_per_cage: int = 8
     estimated_cages: int
     estimated_total_kg: float
     estimated_tons: float

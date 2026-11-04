@@ -31,6 +31,8 @@ class ClientModel(Base):
     zone_code = Column(String(50), nullable=False)
     address = Column(Text, nullable=True)
     contact_phone = Column(String(50), nullable=True)
+    latitude = Column(Numeric(10, 7), nullable=True)
+    longitude = Column(Numeric(10, 7), nullable=True)
     preferred_min_weight = Column(Numeric(4, 2), nullable=True)
     preferred_max_weight = Column(Numeric(4, 2), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -57,6 +59,8 @@ class OrderModel(Base):
 
     requested_quantity = Column(Integer, nullable=False, default=3000)
     allocated_quantity = Column(Integer, nullable=False, default=0)
+    # Densidad de carga: aves por jaula (7-12). Las jaulas se derivan de este valor.
+    density_birds_per_cage = Column(Integer, nullable=False, default=8)
     min_weight_kg = Column(Numeric(4, 2), nullable=False, default=2.20)
     max_weight_kg = Column(Numeric(4, 2), nullable=False, default=2.50)
     sex_preference = Column(String(15), default="INDISTINTO")

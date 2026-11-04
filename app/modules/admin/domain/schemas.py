@@ -66,6 +66,6 @@ class FarmCatalogItem(BaseModel):
 
 
 class FarmCoordinatesUpdate(BaseModel):
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90, description="Latitud WGS84")
+    longitude: Optional[float] = Field(None, ge=-180, le=180, description="Longitud WGS84")
 

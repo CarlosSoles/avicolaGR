@@ -17,6 +17,8 @@ class RoxiRecommendRequest(BaseModel):
     max_weight: float = Field(2.60, gt=0.5, description="Peso máximo aceptable en kg")
     zone_code: str = Field("CENTRO", description="Zona comercial de entrega: NORTE, CENTRO, SUR, METROPOLITANA")
     delivery_address: Optional[str] = Field(None, description="Dirección física de descarga del cliente")
+    delivery_latitude: Optional[float] = Field(None, ge=-90, le=90, description="Latitud del punto de entrega")
+    delivery_longitude: Optional[float] = Field(None, ge=-180, le=180, description="Longitud del punto de entrega")
     scheduled_date: Optional[str] = Field(None, description="Fecha programada de saca (YYYY-MM-DD)")
     user_role: Optional[str] = Field("vendedor", description="Rol que consulta: vendedor, gestor_comercial, gerente_comercial")
 

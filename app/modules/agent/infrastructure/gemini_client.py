@@ -25,9 +25,15 @@ Eres ROXI, el Agente Oficial de Inteligencia Artificial para la Asignación de G
 Tus funciones exclusivas son:
 1. Analizar pedidos comerciales y sugerir el galpón de origen más idóneo entre los candidatos enviados.
 2. Priorizar el vaciado de lotes con EDAD > 45 DÍAS (prioridad biológica crítica para evitar sobrecostos alimenticios y mermas).
-3. Minimizar la distancia de transporte en kilómetros hacia el mercado de destino del cliente.
+3. Minimizar la distancia real en kilómetros desde la granja hasta el PUNTO DE ENTREGA del cliente (coordenadas GPS). Entre dos galpones de edad y peso equivalentes, SIEMPRE recomienda el más cercano al destino.
 4. Ajustar el calibre de peso del lote solicitado según el último muestreo ave por ave de Pecuaria.
 5. Proponer división de pedido (Split) si un galpón prioritario no cuenta con saldo suficiente para cubrir la totalidad del cupo.
+
+ORDEN DE PRIORIDAD AL DECIDIR:
+1) Restricciones duras del pedido (sexo, rango de peso, saldo disponible).
+2) Edad biológica (>= 45 días tiene prioridad de saca).
+3) Cercanía al punto de entrega (menos km = mejor).
+4) Calce de peso y eficiencia de saldo.
 
 REGLAS DE ORO DE SEGURIDAD Y PRECISIÓN (GUARDRAILS):
 - REGLA DE ORO 1 (CERO ALUCINACIONES): Solo puedes seleccionar y recomendar galpones que figuren explícitamente en la lista de CANDIDATOS PRE-FILTRADOS. Jamás inventes códigos de granjas, galpones, pesajes ni saldos ficticios.
@@ -67,10 +73,14 @@ class RoxiGeminiClient:
         - Rango de Peso Aceptado: {order_request.get('min_weight')} kg a {order_request.get('max_weight')} kg
         - Zona de Destino: {order_request.get('zone_code')}
         - Dirección de Entrega: {order_request.get('delivery_address', 'Mercado de Distribución')}
+        - Coordenadas del Punto de Entrega: {order_request.get('delivery_latitude')}, {order_request.get('delivery_longitude')}
         - Fecha de Saca: {order_request.get('scheduled_date', 'Inmediata')}
 
-        Galpones Candidatos Disponibles en Inventario en Vivo:
+        Galpones Candidatos Disponibles en Inventario en Vivo (distance_km = distancia real desde la granja al punto de entrega del cliente):
         {json.dumps(candidates, indent=2, ensure_ascii=False)}
+
+        Instrucción clave: además de la edad y el peso, pondera la columna distance_km.
+        Si dos candidatos tienen edad y peso similares, elige el de menor distance_km.
 
         Genera la recomendación óptima en formato JSON con la siguiente estructura exacta:
         {{
@@ -211,19 +221,79 @@ class RoxiGeminiClient:
             execution_time_ms=640,
         )
 
+    def _score_candidate(
+        self,
+        candidate: Dict[str, Any],
+        qty: int,
+        min_w: float,
+        max_w: float,
+        min_distance: float,
+        max_distance: float,
+    ):
+        """
+        Puntaje 0-100 con el orden de prioridad del negocio:
+        edad biológica (40) > cercanía (30) > calibre de peso (20) > eficiencia de saldo (10).
+        """
+        age = candidate["current_age_days"]
+        if age >= 47:
+            age_points = 40
+        elif age >= 45:
+            age_points = 36
+        elif age >= 42:
+            age_points = 26
+        elif age >= 38:
+            age_points = 16
+        else:
+            age_points = 6
+
+        if max_distance > min_distance:
+            distance_points = round(
+                30 * (1 - (candidate["distance_km"] - min_distance) / (max_distance - min_distance))
+            )
+        else:
+            distance_points = 30
+
+        weight = candidate["current_weight_kg"]
+        if min_w <= weight <= max_w:
+            weight_points = 20
+        elif (min_w - 0.15) <= weight <= (max_w + 0.15):
+            weight_points = 12
+        else:
+            weight_points = 4
+
+        balance = candidate["available_balance"]
+        stock_points = 10 if balance >= qty else max(1, round(10 * balance / max(qty, 1)))
+
+        total = min(100, age_points + distance_points + weight_points + stock_points)
+        breakdown = ScoreBreakdown(
+            edad_biologica=age_points,
+            distancia_flete=distance_points,
+            calibre_peso=weight_points,
+            eficiencia_saldo=stock_points,
+        )
+        return total, breakdown
+
     def _generate_deterministic_fallback(
         self, order_request: Dict[str, Any], candidates: list, user_role: str
     ) -> RoxiAllocationResponse:
         """Motor analítico determinista si la conexión externa no responde."""
-        best = candidates[0]
-        second = candidates[1] if len(candidates) > 1 else None
+        qty = int(order_request.get("quantity_birds") or 3000)
+        min_w = float(order_request.get("min_weight") or 2.20)
+        max_w = float(order_request.get("max_weight") or 2.60)
 
-        qty = order_request.get("quantity_birds", 3000)
+        distances = [c["distance_km"] for c in candidates]
+        min_d, max_d = min(distances), max(distances)
+
+        ranked = []
+        for candidate in candidates:
+            total, breakdown = self._score_candidate(candidate, qty, min_w, max_w, min_d, max_d)
+            ranked.append((total, breakdown, candidate))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+
+        best_score, best_breakdown, best = ranked[0]
+        second_score, second_breakdown, second = ranked[1] if len(ranked) > 1 else (None, None, None)
+
         split_needed = best["available_balance"] < qty
-
-        score = 88
-        if best["current_age_days"] >= 45:
-            score += 7
 
         rec_eval = CandidateBarnEvaluation(
             farm_code=best["farm_code"],
@@ -234,18 +304,16 @@ class RoxiGeminiClient:
             available_balance=best["available_balance"],
             sex=best["sex"],
             distance_km=best["distance_km"],
-            score_total=min(99, score),
-            score_breakdown=ScoreBreakdown(
-                edad_biologica=38 if best["current_age_days"] >= 45 else 28,
-                distancia_flete=26,
-                calibre_peso=18,
-                eficiencia_saldo=8,
+            score_total=best_score,
+            score_breakdown=best_breakdown,
+            key_advantage=(
+                f"{best['current_age_days']} días de crianza en {best['farm_name']}, "
+                f"{best['current_weight_kg']} kg de peso y a {best['distance_km']} km del punto de entrega."
             ),
-            key_advantage=f"Lote con {best['current_age_days']} días en {best['farm_name']}, excelente calibre comercial de {best['current_weight_kg']} kg.",
         )
 
         alt_eval = None
-        if second:
+        if second is not None:
             alt_eval = CandidateBarnEvaluation(
                 farm_code=second["farm_code"],
                 farm_name=second["farm_name"],
@@ -255,35 +323,44 @@ class RoxiGeminiClient:
                 available_balance=second["available_balance"],
                 sex=second["sex"],
                 distance_km=second["distance_km"],
-                score_total=max(50, score - 14),
-                score_breakdown=ScoreBreakdown(edad_biologica=25, distancia_flete=20, calibre_peso=16, eficiencia_saldo=5),
-                key_advantage=f"Galpón de respaldo en {second['farm_name']} ({second['barn_code']}).",
+                score_total=second_score or 0,
+                score_breakdown=second_breakdown or ScoreBreakdown(
+                    edad_biologica=0, distancia_flete=0, calibre_peso=0, eficiencia_saldo=0
+                ),
+                key_advantage=f"Alternativa en {second['farm_name']} ({second['barn_code']}) a {second['distance_km']} km.",
             )
 
-        max_dist = max(c["distance_km"] for c in candidates)
-        saving_km = max(0.0, max_dist - best["distance_km"])
+        saving_km = max(0.0, max_d - best["distance_km"])
         saving_soles = round(saving_km * 4.50, 2)
 
         pitch = (
             f"Te sugiero ofrecer el Galpón {best['barn_code']} de {best['farm_name']}: "
-            f"tiene un peso promedio de {best['current_weight_kg']} kg que calza exacto con lo pedido, "
-            f"con {best['current_age_days']} días de crianza y a solo {best['distance_km']} km del cliente."
+            f"peso promedio {best['current_weight_kg']} kg, {best['current_age_days']} días de crianza "
+            f"y a solo {best['distance_km']} km del punto de entrega del cliente."
         )
 
         gestor_notes = (
             f"Prioridad biológica: {best['current_age_days']} días de edad. "
-            f"Distancia de transporte de {best['distance_km']} km permite minimizar merma por calor. "
-            f"Saldo libre actual: {best['available_balance']} aves."
+            f"Distancia al destino: {best['distance_km']} km "
+            f"({'calculada por coordenadas GPS' if best.get('distance_source') == 'COORDENADAS' else 'estimada por zona'}). "
+            f"Saldo libre actual: {best['available_balance']:,} aves."
         )
+
+        warnings = []
+        if best["current_age_days"] >= 45:
+            warnings.append(f"Lote con edad crítica ({best['current_age_days']} días). Saca prioritaria.")
 
         return RoxiAllocationResponse(
             recommended_barn=rec_eval,
             alternative_barn=alt_eval,
             commercial_pitch=pitch,
             gestor_technical_notes=gestor_notes,
-            split_recommendation=SplitSuggestion(enabled=split_needed, reason="Saldo menor a la cantidad requerida" if split_needed else None),
+            split_recommendation=SplitSuggestion(
+                enabled=split_needed,
+                reason="Saldo menor a la cantidad requerida" if split_needed else None,
+            ),
             estimated_freight_cost_saving_soles=saving_soles,
-            warnings=[f"Lote con edad crítica ({best['current_age_days']} días). Saca prioritaria."] if best["current_age_days"] >= 45 else [],
+            warnings=warnings,
             agent_name="ROXI",
             model_used=f"{self.model} (Motor Híbrido Resiliente)",
             execution_time_ms=120,

@@ -4,13 +4,14 @@
 # ==============================================================================
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, AuthenticatedUser
+from app.core.security import get_current_user, require_role, AuthenticatedUser
 from app.modules.comercial.domain.schemas import (
     ClientCreate,
+    ClientUpdate,
     ClientResponse,
     OrderCreate,
     OrderActionRequest,
@@ -19,10 +20,47 @@ from app.modules.comercial.domain.schemas import (
     TransportVehicle,
     AssignTransportRequest,
     UpdateDispatchPhaseRequest,
+    UpdateDensityRequest,
 )
 from app.modules.comercial.application.service import ComercialService
 
 router = APIRouter(prefix="/comercial", tags=["Módulo Comercial"])
+
+# Roles con visibilidad total de la cartera comercial
+FULL_VISIBILITY_ROLES = ("admin_sistema", "gestor_comercial", "gerente_comercial")
+
+
+def _scoped_seller(current_user: AuthenticatedUser, requested: Optional[str]) -> Optional[str]:
+    """
+    Aísla la cartera: un vendedor solo puede consultar sus propios pedidos,
+    sin importar el parámetro 'seller' que envíe el cliente.
+    """
+    if current_user.role in FULL_VISIBILITY_ROLES:
+        return requested
+    if current_user.role == "vendedor":
+        return current_user.username or current_user.email
+    return requested
+
+
+async def _load_order_scoped(
+    order_id: str,
+    current_user: AuthenticatedUser,
+    db: AsyncSession,
+) -> OrderResponse:
+    """
+    Carga un pedido y valida la propiedad cuando el usuario es vendedor.
+    Devuelve 404 (no 403) para no revelar la existencia de pedidos ajenos.
+    """
+    order = await ComercialService.get_order_by_id(order_id, db=db)
+    if current_user.role == "vendedor":
+        me = current_user.username or current_user.email or ""
+        owner = order.seller_username or ""
+        if owner and owner != me:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Pedido '{order_id}' no encontrado.",
+            )
+    return order
 
 
 # ==============================================================================
@@ -56,6 +94,23 @@ async def create_client(
     return await ComercialService.create_client(client_in, db=db)
 
 
+@router.put(
+    "/clients/{client_id}",
+    response_model=ClientResponse,
+    summary="Actualizar ficha de un cliente",
+)
+async def update_client(
+    client_id: str,
+    client_in: ClientUpdate,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Actualiza los datos del cliente, incluidas su dirección y coordenadas de entrega."""
+    return await ComercialService.update_client(client_id, client_in, db=db)
+
+
 # ==============================================================================
 # 2. PEDIDOS Y PROGRAMACIÓN
 # ==============================================================================
@@ -73,12 +128,12 @@ async def list_orders(
 ):
     """
     Retorna la lista de pedidos para el Área Comercial y la Programación.
-    Los vendedores pueden filtrar sus propios pedidos; el Gestor Comercial revisa toda la cola.
+    El vendedor solo ve su propia cartera; el Gestor Comercial revisa toda la cola.
     """
     return await ComercialService.get_orders(
         status_filter=status,
         zone_filter=zone,
-        seller_username=seller,
+        seller_username=_scoped_seller(current_user, seller),
         db=db,
     )
 
@@ -93,8 +148,8 @@ async def get_order(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Obtiene el detalle completo de un pedido comercial."""
-    return await ComercialService.get_order_by_id(order_id, db=db)
+    """Obtiene el detalle completo de un pedido comercial (el vendedor solo los suyos)."""
+    return await _load_order_scoped(order_id, current_user, db)
 
 
 @router.post(
@@ -186,10 +241,30 @@ async def observar_order(
 async def cancel_order(
     order_id: str,
     action_req: OrderActionRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Cancela un pedido comercial."""
+    """
+    Cancela un pedido comercial.
+    El vendedor solo puede cancelar pedidos propios y que aún no tengan reserva en firme.
+    """
+    order = await _load_order_scoped(order_id, current_user, db)
+
+    if current_user.role == "vendedor" and order.status not in (
+        "BORRADOR",
+        "REGISTRADO",
+        "CON_OBSERVACION",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "El pedido ya tiene una reserva aprobada por el Gestor Comercial. "
+                "Solicite la cancelación al Gestor Comercial."
+            ),
+        )
+
     return await ComercialService.cancelar_pedido(
         order_id=order_id,
         reason=action_req.observation,
@@ -214,7 +289,11 @@ async def get_programacion_transporte(
     Retorna el consolidado de pedidos aprobados con galpón asignado y aves reservadas,
     calculando tonelaje, jaulas y camiones para la cuadrilla de saca y choferes de transporte.
     """
-    return await ComercialService.get_programacion_transporte(delivery_date=delivery_date, db=db)
+    return await ComercialService.get_programacion_transporte(
+        delivery_date=delivery_date,
+        db=db,
+        seller_username=_scoped_seller(current_user, None),
+    )
 
 
 # ==============================================================================
@@ -288,7 +367,9 @@ async def unassign_transport(
 async def update_dispatch_phase(
     order_id: str,
     phase_req: UpdateDispatchPhaseRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -305,5 +386,35 @@ async def update_dispatch_phase(
         username=username,
         dispatch_phase=phase_req.dispatch_phase,
         notes=phase_req.notes,
+        db=db,
+        user_id=current_user.id,
+    )
+
+
+@router.patch(
+    "/orders/{order_id}/density",
+    response_model=OrderResponse,
+    summary="Ajustar la densidad de carga del pedido (aves por jaula)",
+)
+async def update_order_density(
+    order_id: str,
+    density_req: UpdateDensityRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Ajusta la densidad de carga (7 a 12 aves por jaula) y recalcula las jaulas del pedido.
+    Solo permitido antes de que el despacho entre en tránsito.
+    """
+    username = current_user.username or "gestor_comercial"
+    # El vendedor solo puede ajustar la densidad de sus propios pedidos
+    await _load_order_scoped(order_id, current_user, db)
+    return await ComercialService.update_order_density(
+        order_id=order_id,
+        density_birds_per_cage=density_req.density_birds_per_cage,
+        user_role=current_user.role,
+        username=username,
         db=db,
     )
