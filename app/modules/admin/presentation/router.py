@@ -64,6 +64,20 @@ async def list_notifications(
     db: AsyncSession = Depends(get_db),
 ):
     """Notificaciones generadas por eventos, visibles por rol o por usuario específico."""
+    # Retención: descartar notificaciones con más de 90 días y lecturas huérfanas
+    await db.execute(text("DELETE FROM public.notifications WHERE created_at < NOW() - INTERVAL '90 days'"))
+    await db.execute(
+        text(
+            """
+            DELETE FROM public.notification_reads r
+            WHERE NOT EXISTS (
+                SELECT 1 FROM public.notifications n WHERE n.id::text = r.notification_key
+            )
+            """
+        )
+    )
+    await db.commit()
+
     res = await db.execute(
         text("""
             SELECT n.id::text, n.category, n.type, n.title, n.description, n.badge,

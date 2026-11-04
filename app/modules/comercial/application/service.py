@@ -429,6 +429,19 @@ class ComercialService:
                 await db.commit()
                 await db.refresh(new_client_model)
 
+                await notify(
+                    db,
+                    category="gestion_comercial",
+                    type="cliente",
+                    title=f"Nuevo cliente: {new_client_model.business_name}",
+                    description=(
+                        f"Se registró al cliente {new_client_model.business_name} "
+                        f"(RUC {new_client_model.tax_id}, zona {new_client_model.zone_code})."
+                    ),
+                    target_roles=["gestor_comercial", "gerente_comercial", "admin_sistema"],
+                    badge="Catálogo",
+                )
+
                 client_dict = _model_to_client_dict(new_client_model)
                 cls._clients_store.insert(0, client_dict)
                 return ClientResponse(**client_dict)
@@ -1570,6 +1583,23 @@ class ComercialService:
 
                     await db.commit()
                     await db.refresh(m)
+
+                    if density_birds_per_cage != previous_density:
+                        await notify(
+                            db,
+                            category="comercial",
+                            type="ajuste",
+                            title=f"Densidad ajustada en {m.order_number}",
+                            description=(
+                                f"Tu pedido ahora se carga a {density_birds_per_cage} aves/jaula "
+                                f"(~{m.estimated_cages:,} jaulas)."
+                            ),
+                            target_roles=["vendedor"],
+                            target_user_id=m.seller_user_id,
+                            order_id=m.id,
+                            badge="Ajuste",
+                        )
+
                     return OrderResponse(**_model_to_order_dict(m))
             except HTTPException:
                 raise

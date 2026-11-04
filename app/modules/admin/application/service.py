@@ -24,6 +24,7 @@ from app.core.security import (
     verify_password,
     create_access_token,
 )
+from app.shared.infrastructure.notifier import notify
 
 OFFICIAL_FARMS = [
     {"name": "Tradisa 1", "code": "TRAD1"},
@@ -253,6 +254,16 @@ class AdminService:
         self.db.add(new_user)
         await self.db.commit()
         await self.db.refresh(new_user)
+
+        await notify(
+            self.db,
+            category="admin",
+            type="seguridad",
+            title=f"Nuevo usuario: @{clean_username}",
+            description=f"Se creó la cuenta de {dto.full_name.strip()} con el rol {dto.role}.",
+            target_roles=["admin_sistema"],
+            badge="Seguridad",
+        )
 
         return UserProfileResponse.model_validate(new_user)
 
