@@ -100,7 +100,9 @@ async def list_clients(
 )
 async def create_client(
     client_in: ClientCreate,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Registra un nuevo cliente en el catálogo comercial."""
