@@ -4,7 +4,7 @@
 # ==============================================================================
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -14,6 +14,7 @@ from app.modules.comercial.domain.schemas import (
     ClientUpdate,
     ClientResponse,
     OrderCreate,
+    OrderUpdateRequest,
     OrderActionRequest,
     OrderResponse,
     ProgramacionTransporteResponse,
@@ -23,6 +24,7 @@ from app.modules.comercial.domain.schemas import (
     AssignTransportRequest,
     UpdateDispatchPhaseRequest,
     UpdateDensityRequest,
+    GenerarCodigoArisRequest,
     GenerarCodigoArisResponse,
     ConfirmarLlegadaGranjaRequest,
     ConfirmarInicioRutaRequest,
@@ -107,11 +109,11 @@ async def list_clients(
 async def create_client(
     client_in: ClientCreate,
     current_user: AuthenticatedUser = Depends(
-        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+        require_role(["vendedor", "admin_sistema"])
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Registra un nuevo cliente en el catálogo comercial."""
+    """Registra un nuevo cliente en el catálogo comercial (exclusivo de Área Comercial)."""
     return await ComercialService.create_client(client_in, db=db)
 
 
@@ -124,11 +126,11 @@ async def update_client(
     client_id: str,
     client_in: ClientUpdate,
     current_user: AuthenticatedUser = Depends(
-        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+        require_role(["vendedor", "admin_sistema"])
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Actualiza los datos del cliente, incluidas su dirección y coordenadas de entrega."""
+    """Actualiza los datos del cliente, incluidas su dirección y coordenadas de entrega (exclusivo de Área Comercial)."""
     return await ComercialService.update_client(client_id, client_in, db=db)
 
 
@@ -142,6 +144,7 @@ async def update_client(
 )
 async def list_orders(
     status: Optional[str] = Query(None, description="Filtrar por estado: REGISTRADO, APROBADO_RESERVADO, CON_OBSERVACION, etc."),
+    statuses: Optional[str] = Query(None, description="Filtrar por múltiples estados separados por coma"),
     zone: Optional[str] = Query(None, description="Filtrar por zona comercial: NORTE, CENTRO, SUR, METROPOLITANA"),
     seller: Optional[str] = Query(None, description="Filtrar por usuario vendedor"),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -151,11 +154,15 @@ async def list_orders(
     Retorna la lista de pedidos para el Área Comercial y la Programación.
     El vendedor solo ve su propia cartera; el Gestor Comercial revisa toda la cola.
     """
+    status_list = [s.strip() for s in statuses.split(",") if s.strip()] if statuses else None
+    exclude_drafts = current_user.role in ("gestor_comercial", "gerente_comercial", "controlador_flota")
     return await ComercialService.get_orders(
         status_filter=status,
+        statuses_filter=status_list,
         zone_filter=zone,
         seller_username=_scoped_seller(current_user, seller),
         seller_user_id=_scoped_seller_id(current_user),
+        exclude_drafts=exclude_drafts,
         db=db,
     )
 
@@ -182,11 +189,14 @@ async def get_order(
 )
 async def create_order(
     order_in: OrderCreate,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["vendedor", "admin_sistema"])
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Registra un nuevo pedido de venta en el sistema comercial con persistencia en Supabase.
+    Exclusivo del rol Vendedor (y Administrador del Sistema).
     """
     seller_id = str(current_user.id)
     seller_name = current_user.username or current_user.email or "vendedor"
@@ -195,6 +205,35 @@ async def create_order(
         seller_user_id=seller_id,
         seller_username=seller_name,
         seller_full_name=current_user.full_name,
+        creator_role=current_user.role,
+        db=db,
+    )
+
+
+@router.patch(
+    "/orders/{order_id}",
+    response_model=OrderResponse,
+    summary="Editar pedido (Vendedor en borrador) o reserva en Programación de Saca (Gestor)",
+)
+async def update_order(
+    order_id: str,
+    order_in: OrderUpdateRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    El vendedor solo puede editar o enviar pedidos propios mientras estén En borrador (BORRADOR).
+    Gestión Comercial y Administración pueden ajustar reservas en Programación de Saca.
+    """
+    actor_name = current_user.username or current_user.email or "usuario"
+    return await ComercialService.update_order(
+        order_id=order_id,
+        order_in=order_in,
+        user_role=current_user.role,
+        actor_username=actor_name,
+        actor_user_id=str(current_user.id),
         db=db,
     )
 
@@ -516,25 +555,27 @@ async def update_order_density(
 @router.post(
     "/orders/{order_id}/generar-codigo-aris",
     response_model=OrderResponse,
-    summary="Generar Código Aris para el pedido (Gestor Comercial)",
+    summary="Ingresar o generar Código Aris para el pedido (Gestor Comercial)",
 )
 async def generar_codigo_aris(
     order_id: str,
+    req: Optional[GenerarCodigoArisRequest] = Body(None),
     current_user: AuthenticatedUser = Depends(
         require_role(["gestor_comercial", "gerente_comercial", "admin_sistema"])
     ),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    El Gestor Comercial genera un código Aris único para el pedido.
+    El Gestor Comercial registra un código Aris manual o genera uno único automático.
     Requisito: el pedido debe estar aprobado/reservado y con transporte asignado.
-    Al generarlo, el pedido pasa al estado derivado 'Confirmado (código Aris)'.
+    Al registrarlo, el pedido queda confirmado y listo para llegada a granja en Flota.
     """
     gestor_name = current_user.username or "gestor_comercial"
     return await ComercialService.generar_codigo_aris(
         order_id=order_id,
         user_role=current_user.role,
         username=gestor_name,
+        manual_code=req.codigo_aris if req else None,
         db=db,
     )
 

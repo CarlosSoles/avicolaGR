@@ -28,8 +28,11 @@ async def lifespan(app: FastAPI):
     """
     print(f"Iniciando {settings.PROJECT_NAME} en modo {settings.ENVIRONMENT}...")
     try:
-        async with engine.connect() as conn:
+        async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
+            await conn.execute(
+                text("ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS order_lines JSONB DEFAULT '[]'::jsonb")
+            )
         print("Conexión a PostgreSQL (Supabase) establecida exitosamente.")
 
         # Asegurar existencia del admin principal

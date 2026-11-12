@@ -67,6 +67,7 @@ class OrderModel(Base):
 
     estimated_total_kg = Column(Numeric(10, 2), nullable=True)
     estimated_cages = Column(Integer, nullable=True)
+    order_lines = Column(JSONB, default=list, nullable=True)
 
     suggested_farm_code = Column(String(20), nullable=True)
     suggested_barn_code = Column(String(20), nullable=True)

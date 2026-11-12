@@ -27,6 +27,9 @@ httpx==0.27.0
 # Motor de Inteligencia Artificial (Google Gemini)
 google-generativeai==0.5.4
 
+# Síntesis de Voz Neural Gratuita (Microsoft Edge TTS)
+edge-tts>=6.1.12
+
 # Análisis Estadístico y Numérico (Muestreos de Pesaje)
 numpy==1.26.4
 

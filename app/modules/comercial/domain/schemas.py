@@ -55,13 +55,26 @@ class ClientResponse(ClientBase):
     created_at: str
 
 
+class OrderLineItem(BaseModel):
+    """Línea de detalle de un pedido (pollos, jabas, densidad, sexo, peso y notas)."""
+
+    id: Optional[str] = None
+    requested_quantity: int = Field(..., gt=0, description="Número de pollos de la línea")
+    cages: Optional[int] = Field(None, ge=1, description="Número de jabas (redondeadas hacia arriba)")
+    density_birds_per_cage: int = Field(8, ge=7, le=12, description="Densidad en pollos por jaba (7-12)")
+    sex_preference: str = Field("MACHO", description="MACHO | HEMBRA | MIXTO | INDISTINTO")
+    min_weight_kg: float = Field(2.20, gt=0, description="Peso mínimo (kg)")
+    max_weight_kg: float = Field(2.50, gt=0, description="Peso máximo (kg)")
+    notes: Optional[str] = Field(None, description="Observaciones de la línea")
+
+
 class OrderCreate(BaseModel):
     client_id: Optional[str] = Field(None, description="ID del cliente si existe en catálogo")
     client_name: str = Field(..., description="Nombre o razón social del cliente")
     client_tax_id: Optional[str] = Field(None, description="RUC o documento del cliente")
     seller_full_name: Optional[str] = Field(None, description="Nombre completo del vendedor")
     zone_code: str = Field("METROPOLITANA", description="Zona comercial de entrega")
-    target_delivery_date: Optional[str] = Field(None, description="Fecha de creación del pedido (YYYY-MM-DD, asignada automáticamente)")
+    target_delivery_date: Optional[str] = Field(None, description="Fecha solicitada / de saca (YYYY-MM-DD)")
     requested_quantity: int = Field(..., gt=0, description="Cantidad total de aves solicitadas")
     density_birds_per_cage: int = Field(
         8,
@@ -71,7 +84,7 @@ class OrderCreate(BaseModel):
     )
     min_weight_kg: Optional[float] = Field(None, gt=0, description="Peso mínimo requerido en kg (opcional, gestionado por Gestor Comercial)")
     max_weight_kg: Optional[float] = Field(None, gt=0, description="Peso máximo requerido en kg (opcional, gestionado por Gestor Comercial)")
-    sex_preference: str = Field("MACHO", description="Preferencia de sexo: MACHO o HEMBRA")
+    sex_preference: str = Field("MACHO", description="Preferencia de sexo: MACHO, HEMBRA o MIXTO")
     suggested_farm_code: Optional[str] = Field(None, description="Código de granja orientativa de Pecuaria")
     suggested_barn_code: Optional[str] = Field(None, description="Código de galpón orientativo de Pecuaria")
     external_reference: Optional[str] = Field(None, description="Orden de Compra u OC del cliente")
@@ -79,7 +92,40 @@ class OrderCreate(BaseModel):
     delivery_address: Optional[str] = Field(None, description="Dirección o punto de entrega físico")
     delivery_latitude: Optional[float] = Field(None, description="Latitud Google Maps del punto de entrega")
     delivery_longitude: Optional[float] = Field(None, description="Longitud Google Maps del punto de entrega")
+    order_lines: Optional[List[OrderLineItem]] = Field(None, description="Líneas detalladas del pedido")
     is_draft: bool = False
+    auto_reserve: bool = Field(
+        False,
+        description="Si es true (solo Gestor/Gerente/Admin con granja y galpón), aprueba y reserva saldo al crear",
+    )
+
+
+class OrderUpdateRequest(BaseModel):
+    """Actualización controlada de un pedido/reserva desde Pedidos o Programación de Saca."""
+
+    client_id: Optional[str] = Field(None, description="ID del cliente")
+    client_name: Optional[str] = Field(None, description="Nombre del cliente")
+    client_tax_id: Optional[str] = Field(None, description="RUC o DNI del cliente")
+    zone_code: Optional[str] = Field(None, description="Zona de entrega")
+    seller_full_name: Optional[str] = Field(None, description="Nombre visible del vendedor")
+    seller_username: Optional[str] = Field(None, description="Usuario vendedor")
+    delivery_address: Optional[str] = Field(None, description="Dirección de entrega")
+    delivery_latitude: Optional[float] = Field(None, ge=-90, le=90)
+    delivery_longitude: Optional[float] = Field(None, ge=-180, le=180)
+    target_delivery_date: Optional[str] = Field(None, description="Fecha de saca / solicitada (YYYY-MM-DD)")
+    requested_quantity: Optional[int] = Field(None, gt=0, description="Cantidad de aves solicitadas")
+    allocated_quantity: Optional[int] = Field(None, gt=0, description="Cantidad de aves reservadas")
+    density_birds_per_cage: Optional[int] = Field(None, ge=7, le=12, description="Aves por jaula (7-12)")
+    min_weight_kg: Optional[float] = Field(None, gt=0, description="Peso mínimo en kg")
+    max_weight_kg: Optional[float] = Field(None, gt=0, description="Peso máximo en kg")
+    sex_preference: Optional[str] = Field(None, description="MACHO | HEMBRA | MIXTO")
+    farm_code: Optional[str] = Field(None, description="Código de granja")
+    barn_code: Optional[str] = Field(None, description="Código de galpón")
+    external_reference: Optional[str] = Field(None, description="Orden de Compra / Referencia externa")
+    notes: Optional[str] = Field(None, description="Observaciones operativas")
+    order_lines: Optional[List[OrderLineItem]] = Field(None, description="Líneas actualizadas del pedido")
+    is_draft: Optional[bool] = Field(None, description="Si es false sobre un BORRADOR, lo envía a Preprogramación (REGISTRADO)")
+    force_reservation: bool = Field(False, description="Forzar reserva (solo admin/gerente)")
 
 
 class OrderActionRequest(BaseModel):
@@ -125,6 +171,7 @@ class OrderResponse(BaseModel):
     sex_preference: str = "INDISTINTO"
     estimated_total_kg: Optional[float] = None
     estimated_cages: Optional[int] = None
+    order_lines: List[OrderLineItem] = Field(default_factory=list)
     suggested_farm_code: Optional[str]
     suggested_barn_code: Optional[str]
     assigned_farm_code: Optional[str]
@@ -178,6 +225,14 @@ class UpdateDispatchPhaseRequest(BaseModel):
         description="Fase del ciclo de vida: TRANSPORTE_ASIGNADO | EN_GRANJA_CARGANDO | EN_TRANSITO | ENTREGADO_CONFORME",
     )
     notes: Optional[str] = None
+
+
+class GenerarCodigoArisRequest(BaseModel):
+    codigo_aris: Optional[str] = Field(
+        None,
+        max_length=20,
+        description="Código ARIS manual opcional; si se omite, el sistema lo genera automáticamente.",
+    )
 
 
 class GenerarCodigoArisResponse(BaseModel):

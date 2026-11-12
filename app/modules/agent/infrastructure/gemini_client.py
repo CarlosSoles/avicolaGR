@@ -366,33 +366,366 @@ class RoxiGeminiClient:
             execution_time_ms=120,
         )
 
-    async def chat(self, request_msg: str, user_role: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Responde consultas en lenguaje natural delimitadas estrictamente al ámbito avícola."""
+    def _deterministic_chat_fallback(
+        self,
+        request_msg: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Respuestas deterministas exactas basadas en KPIs reales si Gemini no está disponible."""
+        q = request_msg.lower()
+        ctx = context or {}
+        ped = ctx.get("pedidos_resumen") or {}
+        sal = ctx.get("saldos_resumen") or {}
+        pend_top = ctx.get("pedidos_pendientes_top") or []
+        foco = ctx.get("pedido_en_foco")
+        especifica = ctx.get("consulta_especifica")
+
+        if isinstance(especifica, dict):
+            tipo = especifica.get("tipo")
+            if tipo == "galpon":
+                peso_txt = (
+                    f" | **Peso prom.:** {especifica['avg_weight_kg']} kg"
+                    if especifica.get("avg_weight_kg") is not None
+                    else ""
+                )
+                sexo_txt = f" | **Sexo:** {especifica['sex']}" if especifica.get("sex") else ""
+                reply = (
+                    f"**{especifica['farm_name']} ({especifica['farm_code']}) · {especifica['barn_code']}:**\n"
+                    f"- **Saldo disponible:** {especifica['available_birds']:,} aves\n"
+                    f"- **Edad actual:** {especifica['age_days']} días{peso_txt}{sexo_txt}\n"
+                    f"- **Estado del galpón:** {especifica.get('barn_status', 'OPERATIVO')}"
+                )
+                spoken = (
+                    f"El galpón {especifica['barn_code']} de {especifica['farm_name']} tiene "
+                    f"{especifica['available_birds']} aves disponibles, con {especifica['age_days']} días de edad."
+                )
+                return {
+                    "reply": reply,
+                    "spoken_reply": spoken,
+                    "in_scope": True,
+                    "suggested_action": "ASIGNAR_GALPON",
+                    "action_payload": {
+                        "farm_code": especifica["farm_code"],
+                        "barn_code": especifica["barn_code"],
+                    },
+                }
+
+            if tipo == "galpon_no_encontrado":
+                disp = especifica.get("galpones_disponibles") or []
+                disp_txt = ", ".join(
+                    f"{g['barn_code']} ({g['available_birds']:,} aves)" for g in disp
+                )
+                reply = (
+                    f"No encontré el galpón **{especifica['barn_code']}** con saldo activo en **{especifica['farm_name']} ({especifica['farm_code']})**.\n"
+                    + (f"Galpones disponibles en esa granja: {disp_txt}." if disp_txt else "No hay galpones activos registrados en esa granja.")
+                )
+                spoken = (
+                    f"No encontré el galpón {especifica['barn_code']} activo en {especifica['farm_name']}."
+                )
+                return {
+                    "reply": reply,
+                    "spoken_reply": spoken,
+                    "in_scope": True,
+                    "suggested_action": None,
+                    "action_payload": None,
+                }
+
+            if tipo == "granja":
+                galpones = especifica.get("galpones") or []
+                total_aves = sum(g.get("available_birds", 0) for g in galpones)
+                lines = [
+                    f"- **{g['barn_code']}**: {g['available_birds']:,} aves | {g['age_days']} días"
+                    + (f" | {g['avg_weight_kg']} kg" if g.get("avg_weight_kg") is not None else "")
+                    + f" ({g.get('barn_status', 'OPERATIVO')})"
+                    for g in galpones
+                ]
+                reply = (
+                    f"**Saldos en {especifica['farm_name']} ({especifica['farm_code']}) — Total {total_aves:,} aves:**\n"
+                    + "\n".join(lines)
+                )
+                spoken = (
+                    f"{especifica['farm_name']} tiene {len(galpones)} galpones con un total de {total_aves} aves disponibles."
+                )
+                return {
+                    "reply": reply,
+                    "spoken_reply": spoken,
+                    "in_scope": True,
+                    "suggested_action": None,
+                    "action_payload": None,
+                }
+
+        if any(k in q for k in ("kpi", "resumen", "hoy", "estado", "cuántos", "cuantos", "general")):
+            total_act = ped.get("total_activos", 0)
+            pend = ped.get("pendientes_completar_granja", 0)
+            listos = ped.get("listos_para_programar", 0)
+            prog = ped.get("programados", 0) + ped.get("programados_con_camion", 0)
+            sin_cam = ped.get("sin_camion", 0)
+            sin_aris = ped.get("sin_aris_con_camion", 0)
+            crit = sal.get("galpones_criticos_45d_count", 0)
+            aves_disp = sal.get("aves_disponibles_total", 0)
+
+            reply = (
+                f"**Resumen operativo en tiempo real:**\n"
+                f"- **Pedidos activos:** {total_act} ({ped.get('aves_activas_total', 0):,} aves)\n"
+                f"- **Por completar granja/galpón:** {pend} | **Listos para programar:** {listos}\n"
+                f"- **Programados (en saca/flota):** {prog} (sin camión: {sin_cam}, sin ARIS: {sin_aris})\n"
+                f"- **Galpones operativos:** {sal.get('galpones_operativos', 0)} ({aves_disp:,} aves disponibles)\n"
+                f"- **Galpones críticos (≥45 días):** {crit}"
+            )
+            spoken = (
+                f"Tienes {total_act} pedidos activos. {pend} están pendientes de completar granja y galpón, "
+                f"{sin_cam} programados esperan camión, y hay {crit} galpones con más de 45 días."
+            )
+            return {
+                "reply": reply,
+                "spoken_reply": spoken,
+                "in_scope": True,
+                "suggested_action": "IR_A_PEDIDOS" if (pend + listos) > 0 else None,
+                "action_payload": {"pendientes": pend + listos} if (pend + listos) > 0 else None,
+            }
+
+        if any(k in q for k in ("pendiente", "completar", "preprogram", "falta")):
+            if not pend_top:
+                msg = "No tienes pedidos preprogramados pendientes de completar en este momento."
+                return {
+                    "reply": msg,
+                    "spoken_reply": msg,
+                    "in_scope": True,
+                    "suggested_action": None,
+                    "action_payload": None,
+                }
+            lines = [
+                f"- **{p['order_number']}** · {p['client_name']} ({p['requested_quantity']:,} aves, Zona {p['zone_code']}) — "
+                + (
+                    f"Listo ({p['granja_sugerida']} · {p['galpon_sugerido']})"
+                    if p.get("granja_sugerida") and p.get("galpon_sugerido")
+                    else "Pendiente de asignar granja y galpón"
+                )
+                for p in pend_top
+            ]
+            reply = f"**Pedidos pendientes en bandeja ({len(pend_top)} mostrados):**\n" + "\n".join(lines)
+            first = pend_top[0]
+            spoken = (
+                f"Tienes {ped.get('pendientes_completar_granja', 0)} pedidos por completar y "
+                f"{ped.get('listos_para_programar', 0)} listos para programar. El primero es de "
+                f"{first['client_name']} por {first['requested_quantity']} aves."
+            )
+            return {
+                "reply": reply,
+                "spoken_reply": spoken,
+                "in_scope": True,
+                "suggested_action": "IR_A_PEDIDOS",
+                "action_payload": {"order_id": first.get("order_id")},
+            }
+
+        if any(k in q for k in ("galp", "edad", "45", "crític", "critic", "saldo", "aves")):
+            crit_list = sal.get("galpones_criticos_45d") or []
+            if not crit_list:
+                msg = (
+                    f"Actualmente hay {sal.get('galpones_operativos', 0)} galpones operativos con "
+                    f"{sal.get('aves_disponibles_total', 0):,} aves disponibles, y ninguno supera los 45 días."
+                )
+                return {
+                    "reply": msg,
+                    "spoken_reply": msg,
+                    "in_scope": True,
+                    "suggested_action": None,
+                    "action_payload": None,
+                }
+            lines = [
+                f"- **{g['farm_code']} ({g['farm_name']}) · {g['barn_code']}**: {g['age_days']} días, {g['available_birds']:,} aves"
+                for g in crit_list
+            ]
+            top = crit_list[0]
+            reply = f"**Galpones prioritarios (≥ 45 días):**\n" + "\n".join(lines)
+            spoken = (
+                f"Hay {sal.get('galpones_criticos_45d_count', len(crit_list))} galpones con 45 días o más. "
+                f"El más urgente es {top['farm_name']}, galpón {top['barn_code']}, con {top['age_days']} días "
+                f"y {top['available_birds']} aves."
+            )
+            return {
+                "reply": reply,
+                "spoken_reply": spoken,
+                "in_scope": True,
+                "suggested_action": "ASIGNAR_GALPON",
+                "action_payload": {"farm_code": top["farm_code"], "barn_code": top["barn_code"]},
+            }
+
+        if any(k in q for k in ("camión", "camion", "flota", "aris", "transporte")):
+            sin_cam = ped.get("sin_camion", 0)
+            sin_aris = ped.get("sin_aris_con_camion", 0)
+            en_ruta = ped.get("despachados", 0)
+            reply = (
+                f"**Estado de flota y código ARIS:**\n"
+                f"- Programados esperando camión en Control de Flota: **{sin_cam}**\n"
+                f"- Con camión asignado pero sin código ARIS: **{sin_aris}**\n"
+                f"- En ruta hacia cliente (Despachados): **{en_ruta}**"
+            )
+            spoken = (
+                f"Hay {sin_cam} pedidos programados esperando camión, {sin_aris} con camión pendiente de código ARIS, "
+                f"y {en_ruta} despachos en ruta."
+            )
+            return {
+                "reply": reply,
+                "spoken_reply": spoken,
+                "in_scope": True,
+                "suggested_action": None,
+                "action_payload": None,
+            }
+
+        if foco and foco.get("recomendacion"):
+            r = foco["recomendacion"]
+            reply = (
+                f"**Recomendación para {foco['order_number']} ({foco['client_name']}, {foco['requested_quantity']:,} aves):**\n"
+                f"- **Granja y galpón sugerido:** {r['farm_code']} ({r['farm_name']}) · **{r['barn_code']}**\n"
+                f"- **Edad:** {r['age_days']} días | **Saldo:** {r['available_balance']:,} aves | **Distancia:** {r['distance_km']} km\n"
+                f"- **Score ROXI:** {r['score_total']}/100"
+                + ("\n- *Nota:* El saldo es menor al pedido; evalúa fraccionamiento." if r.get("split_enabled") else "")
+            )
+            spoken = (
+                f"Para el pedido de {foco['client_name']}, te recomiendo {r['farm_name']}, galpón {r['barn_code']}, "
+                f"con {r['age_days']} días de edad y a {r['distance_km']} kilómetros."
+            )
+            return {
+                "reply": reply,
+                "spoken_reply": spoken,
+                "in_scope": True,
+                "suggested_action": "ASIGNAR_GALPON",
+                "action_payload": {
+                    "order_id": foco.get("order_id"),
+                    "farm_code": r["farm_code"],
+                    "barn_code": r["barn_code"],
+                },
+            }
+
+        msg = (
+            f"Soy ROXI, conectada en tiempo real a Avícola GR. Actualmente hay {ped.get('total_activos', 0)} pedidos activos "
+            f"y {sal.get('galpones_criticos_45d_count', 0)} galpones con edad crítica. "
+            f"Puedes preguntarme por KPIs de hoy, pedidos pendientes, galpones críticos o recomendaciones de granja."
+        )
+        return {
+            "reply": msg,
+            "spoken_reply": msg,
+            "in_scope": True,
+            "suggested_action": None,
+            "action_payload": None,
+        }
+
+    async def chat(
+        self,
+        request_msg: str,
+        user_role: str,
+        context: Optional[Dict[str, Any]] = None,
+        history: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Responde consultas en lenguaje natural con KPIs reales y guardrails estrictos."""
         clean_msg = request_msg.lower().strip()
 
-        # Guardrail de ámbito temático (Out-of-Scope check)
-        disallowed_keywords = ["poema", "chiste", "receta", "canción", "fútbol", "bitcoin", "cripto", "código java", "hack"]
+        # Guardrail de ámbito temático (Out-of-Scope check rápido sin gastar cuota)
+        disallowed_keywords = [
+            "poema", "chiste", "receta", "canción", "cancion", "fútbol", "futbol",
+            "bitcoin", "cripto", "código java", "codigo python", "hack", "política", "politica",
+        ]
         if any(w in clean_msg for w in disallowed_keywords):
+            refusal = (
+                "Soy ROXI, asistente operativa de Avícola GR. Solo puedo ayudarte con KPIs comerciales, "
+                "pedidos, programación de saca, selección de granja o galpón y seguimiento de flota."
+            )
             return {
-                "reply": "Soy ROXI, el agente de optimización comercial y saca de Avícola GR. Mi labor está delimitada exclusivamente a la asignación de galpones, balanceo de saldos, control de edad biológica y logística de flota.",
+                "reply": refusal,
+                "spoken_reply": refusal,
                 "in_scope": False,
                 "suggested_action": None,
                 "action_payload": None,
             }
 
-        # Contexto de respuesta operativa
-        if "galpon" in clean_msg or "edad" in clean_msg or "recomiend" in clean_msg or "saca" in clean_msg:
-            return {
-                "reply": "Para recomendarte el galpón ideal, evalúo en tiempo real los lotes con edad > 45 días (para evitar sobrecosto de alimento), la distancia en km al mercado del cliente y el rango de peso solicitado. Puedes ingresar la cantidad de aves y zona de entrega para darte la recomendación óptima.",
-                "in_scope": True,
-                "suggested_action": "ASIGNAR_GALPON",
-                "action_payload": {"status": "READY"},
-            }
+        if not self.api_key or len(self.api_key) < 10:
+            return self._deterministic_chat_fallback(request_msg, context)
 
-        return {
-            "reply": f"Hola, soy ROXI. Estoy conectada al inventario oficial en tiempo real para apoyarte en la asignación inteligente de galpones de las 23 granjas de Avícola GR. ¿Qué pedido deseas que evaluemos?",
-            "in_scope": True,
-            "suggested_action": None,
-            "action_payload": None,
+        history_text = ""
+        if history:
+            turns = []
+            for h in history[-6:]:
+                role_label = "Usuario" if h.get("role") == "user" else "ROXI"
+                turns.append(f"{role_label}: {str(h.get('text', ''))[:220]}")
+            history_text = "\nHISTORIAL RECIENTE:\n" + "\n".join(turns)
+
+        system_instruction = (
+            "Eres ROXI, asistente ejecutiva de operaciones comerciales y saca de Avícola GR (Perú).\n"
+            "ESTILO Y VOZ: Responde en español latino neutro, claro, calmado y profesional (sin modismos regionales).\n"
+            "RESTRICCIONES ESTRICTAS:\n"
+            "1. Solo usa cifras, granjas, galpones y pedidos que figuren en el SNAPSHOT REAL DE DATOS. Si falta un dato, dilo sin inventar.\n"
+            "2. Nunca ejecutas cambios; solo recomiendas acciones para que el Gestor decida.\n"
+            "3. Si la pregunta es ajena a la operación avícola/comercial/flota, marca in_scope=false y declina brevemente.\n"
+            "4. Responde OBLIGATORIAMENTE en JSON válido con estas claves exactas:\n"
+            '{"reply": "respuesta clara en markdown corto (máx 110 palabras)", '
+            '"spoken_reply": "resumen hablado natural de 1 a 2 frases cortas sin markdown, emojis ni guiones largos (máx 260 caracteres)", '
+            '"in_scope": true, '
+            '"suggested_action": null o "IR_A_PEDIDOS" o "ASIGNAR_GALPON", '
+            '"action_payload": null o {"order_id": "...", "farm_code": "...", "barn_code": "..."}}'
+        )
+
+        user_prompt = (
+            f"ROL DEL USUARIO: {user_role}\n"
+            f"SNAPSHOT REAL DE DATOS:\n{json.dumps(context or {}, ensure_ascii=False)}\n"
+            f"{history_text}\n"
+            f"PREGUNTA ACTUAL: {request_msg}"
+        )
+
+        payload = {
+            "system_instruction": {"parts": [{"text": system_instruction}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 450,
+                "responseMimeType": "application/json",
+            },
         }
+
+        candidate_models = []
+        for m in (self.model, "gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash-lite"):
+            if m and m not in candidate_models:
+                candidate_models.append(m)
+
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                data = None
+                last_err: Optional[Exception] = None
+                for model_name in candidate_models:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 404:
+                        last_err = httpx.HTTPStatusError(
+                            f"404 for {model_name}", request=resp.request, response=resp
+                        )
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    break
+
+                if data is None:
+                    raise last_err or RuntimeError("Ningún modelo Gemini disponible")
+
+                raw_text = (
+                    data.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+                    .strip()
+                )
+                parsed = json.loads(raw_text)
+                reply = str(parsed.get("reply") or "").strip()
+                spoken = str(parsed.get("spoken_reply") or "").strip() or reply[:250]
+                if not reply:
+                    return self._deterministic_chat_fallback(request_msg, context)
+                return {
+                    "reply": reply,
+                    "spoken_reply": spoken[:320],
+                    "in_scope": bool(parsed.get("in_scope", True)),
+                    "suggested_action": parsed.get("suggested_action"),
+                    "action_payload": parsed.get("action_payload"),
+                }
+        except Exception as exc:
+            logger.warning("Fallback determinista en ROXI chat (%s): %s", self.model, exc)
+            return self._deterministic_chat_fallback(request_msg, context)
 

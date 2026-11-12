@@ -70,17 +70,33 @@ class RoxiAllocationResponse(BaseModel):
     execution_time_ms: int = Field(0, description="Tiempo total de inferencia en milisegundos")
 
 
+class RoxiChatHistoryItem(BaseModel):
+    """Turno previo de conversación con ROXI (para mantener contexto corto)."""
+    role: str = Field(..., description="user | assistant")
+    text: str = Field(..., description="Contenido del mensaje")
+
+
 class RoxiChatRequest(BaseModel):
     """Consulta en lenguaje natural a ROXI con contexto operativo."""
     message: str = Field(..., min_length=2, description="Mensaje o pregunta dirigida a ROXI")
+    order_id: Optional[str] = Field(None, description="ID del pedido seleccionado si aplica")
     order_context: Optional[Dict[str, Any]] = Field(None, description="Datos del pedido actual si aplica")
+    history: List[RoxiChatHistoryItem] = Field(default_factory=list, description="Últimos turnos de chat")
     user_role: Optional[str] = Field("vendedor", description="Rol del usuario que interactúa")
 
 
 class RoxiChatResponse(BaseModel):
     """Respuesta conversacional de ROXI delimitada por guardrails."""
-    reply: str = Field(..., description="Respuesta contextual de ROXI")
+    reply: str = Field(..., description="Respuesta completa en texto para mostrar en pantalla")
+    spoken_reply: str = Field("", description="Resumen corto y natural para lectura por voz")
     in_scope: bool = Field(True, description="Indica si la consulta correspondió al ámbito avícola comercial")
-    suggested_action: Optional[str] = Field(None, description="Acción sugerida: ASIGNAR_GALPON, REASIGNAR, FRACCIONAR")
+    suggested_action: Optional[str] = Field(None, description="Acción sugerida: ASIGNAR_GALPON, REASIGNAR, FRACCIONAR, IR_A_PEDIDOS")
     action_payload: Optional[Dict[str, Any]] = Field(None, description="Parámetros para ejecutar la acción sugerida")
+    kpis_snapshot: Optional[Dict[str, Any]] = Field(None, description="Resumen de KPIs reales usados en la respuesta")
+
+
+class RoxiTtsRequest(BaseModel):
+    """Solicitud de síntesis de voz para ROXI."""
+    text: str = Field(..., min_length=1, max_length=800, description="Texto a convertir en audio")
+    voice: Optional[str] = Field("es-CO-SalomeNeural", description="Voz neural de edge-tts")
 

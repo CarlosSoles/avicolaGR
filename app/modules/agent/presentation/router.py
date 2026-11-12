@@ -3,7 +3,7 @@
 # Archivo: backend/app/modules/agent/presentation/router.py
 # ==============================================================================
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -14,8 +14,10 @@ from app.modules.agent.domain.schemas import (
     RoxiAllocationResponse,
     RoxiChatRequest,
     RoxiChatResponse,
+    RoxiTtsRequest,
 )
 from app.modules.agent.application.roxi_service import RoxiAgentService
+from app.modules.agent.infrastructure.tts_client import synthesize_speech_mp3
 
 router = APIRouter(prefix="/agent", tags=["Agente IA • ROXI"])
 
@@ -93,6 +95,35 @@ async def chat_with_roxi(
     req.user_role = current_user.role
     service = RoxiAgentService(db=db)
     return await service.chat(req)
+
+
+@router.post(
+    "/tts",
+    summary="Síntesis de voz neuronal gratuita para ROXI (edge-tts)",
+)
+async def roxi_text_to_speech(
+    req: RoxiTtsRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Convierte el resumen hablado de ROXI a MP3 usando edge-tts (es-CO-SalomeNeural
+    con ajuste suave de ritmo y tono). Si edge-tts no está disponible, devuelve 503
+    para que el frontend use el respaldo nativo del navegador.
+    """
+    try:
+        audio_bytes = await synthesize_speech_mp3(text=req.text, voice=req.voice)
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except RuntimeError as re_err:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(re_err),
+        )
 
 
 @router.get(

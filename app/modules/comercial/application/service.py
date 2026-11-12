@@ -17,6 +17,7 @@ from app.modules.comercial.domain.schemas import (
     ClientUpdate,
     ClientResponse,
     OrderCreate,
+    OrderUpdateRequest,
     OrderActionRequest,
     OrderResponse,
     ProgramacionTransporteItem,
@@ -255,7 +256,103 @@ def _model_to_client_dict(model: ClientModel) -> Dict[str, Any]:
     }
 
 
+def _build_fallback_order_line(
+    qty: int,
+    density: int,
+    sex_pref: str,
+    min_w: float,
+    max_w: float,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    safe_density = max(7, min(12, int(density or 8)))
+    safe_qty = max(1, int(qty or 1))
+    safe_sex = (sex_pref or "MACHO").upper().strip()
+    if safe_sex not in ("MACHO", "HEMBRA", "MIXTO", "INDISTINTO"):
+        safe_sex = "MACHO"
+    return {
+        "id": "line-1",
+        "requested_quantity": safe_qty,
+        "cages": int(math.ceil(safe_qty / safe_density)),
+        "density_birds_per_cage": safe_density,
+        "sex_preference": safe_sex,
+        "min_weight_kg": round(float(min_w), 2),
+        "max_weight_kg": round(float(max_w), 2),
+        "notes": (notes or "").strip() or None,
+    }
+
+
+def _normalize_order_lines(raw_lines: List[Any], fallback_density: int = 8) -> Dict[str, Any]:
+    normalized: List[Dict[str, Any]] = []
+    total_qty = 0
+    total_cages = 0
+    total_kg = 0.0
+    min_weights: List[float] = []
+    max_weights: List[float] = []
+    sexes = set()
+
+    for idx, item in enumerate(raw_lines):
+        data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        qty = int(data.get("requested_quantity") or 0)
+        if qty <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Línea {idx + 1}: la cantidad de pollos debe ser mayor a cero.",
+            )
+        density = max(7, min(12, int(data.get("density_birds_per_cage") or fallback_density or 8)))
+        min_w = round(float(data.get("min_weight_kg") or 2.20), 2)
+        max_w = round(float(data.get("max_weight_kg") or 2.50), 2)
+        if min_w <= 0 or max_w <= 0 or min_w > max_w:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Línea {idx + 1}: el peso mínimo ({min_w} kg) no puede ser mayor al máximo ({max_w} kg).",
+            )
+        sex = str(data.get("sex_preference") or "MACHO").upper().strip()
+        if sex not in ("MACHO", "HEMBRA", "MIXTO", "INDISTINTO"):
+            sex = "MACHO"
+        cages = int(math.ceil(qty / density))
+        line_notes = (data.get("notes") or "").strip() or None
+
+        normalized.append({
+            "id": str(data.get("id") or f"line-{idx + 1}"),
+            "requested_quantity": qty,
+            "cages": cages,
+            "density_birds_per_cage": density,
+            "sex_preference": sex,
+            "min_weight_kg": min_w,
+            "max_weight_kg": max_w,
+            "notes": line_notes,
+        })
+        total_qty += qty
+        total_cages += cages
+        total_kg += qty * ((min_w + max_w) / 2.0)
+        min_weights.append(min_w)
+        max_weights.append(max_w)
+        sexes.add(sex)
+
+    effective_density = max(7, min(12, round(total_qty / max(1, total_cages))))
+    effective_sex = next(iter(sexes)) if len(sexes) == 1 else "MIXTO"
+    return {
+        "lines": normalized,
+        "requested_quantity": total_qty,
+        "estimated_cages": total_cages,
+        "density_birds_per_cage": effective_density,
+        "min_weight_kg": min(min_weights),
+        "max_weight_kg": max(max_weights),
+        "estimated_total_kg": round(total_kg, 2),
+        "sex_preference": effective_sex,
+    }
+
+
 def _model_to_order_dict(model: OrderModel) -> Dict[str, Any]:
+    min_w = float(model.min_weight_kg) if model.min_weight_kg is not None else 2.20
+    max_w = float(model.max_weight_kg) if model.max_weight_kg is not None else 2.50
+    density = model.density_birds_per_cage or 8
+    sex_pref = model.sex_preference or "INDISTINTO"
+    lines = (
+        model.order_lines
+        if isinstance(model.order_lines, list) and len(model.order_lines) > 0
+        else [_build_fallback_order_line(model.requested_quantity, density, sex_pref, min_w, max_w)]
+    )
     return {
         "id": str(model.id),
         "order_number": model.order_number,
@@ -269,12 +366,13 @@ def _model_to_order_dict(model: OrderModel) -> Dict[str, Any]:
         "target_delivery_date": str(model.target_delivery_date),
         "requested_quantity": model.requested_quantity,
         "allocated_quantity": model.allocated_quantity or 0,
-        "density_birds_per_cage": model.density_birds_per_cage or 8,
-        "min_weight_kg": float(model.min_weight_kg) if model.min_weight_kg is not None else 2.20,
-        "max_weight_kg": float(model.max_weight_kg) if model.max_weight_kg is not None else 2.50,
-        "sex_preference": model.sex_preference or "INDISTINTO",
+        "density_birds_per_cage": density,
+        "min_weight_kg": min_w,
+        "max_weight_kg": max_w,
+        "sex_preference": sex_pref,
         "estimated_total_kg": float(model.estimated_total_kg) if model.estimated_total_kg is not None else None,
         "estimated_cages": model.estimated_cages,
+        "order_lines": lines,
         "suggested_farm_code": model.suggested_farm_code,
         "suggested_barn_code": model.suggested_barn_code,
         "assigned_farm_code": model.assigned_farm_code,
@@ -769,16 +867,22 @@ class ComercialService:
     async def get_orders(
         cls,
         status_filter: Optional[str] = None,
+        statuses_filter: Optional[List[str]] = None,
         zone_filter: Optional[str] = None,
         seller_username: Optional[str] = None,
         seller_user_id: Optional[str] = None,
+        exclude_drafts: bool = False,
         db: Optional[AsyncSession] = None,
     ) -> List[OrderResponse]:
         """Lista los pedidos registrados desde la base de datos PostgreSQL."""
         if db is not None:
             try:
                 stmt = select(OrderModel).order_by(OrderModel.target_delivery_date.desc(), OrderModel.created_at.desc())
-                if status_filter:
+                if exclude_drafts:
+                    stmt = stmt.where(OrderModel.status != "BORRADOR")
+                if statuses_filter:
+                    stmt = stmt.where(OrderModel.status.in_(statuses_filter))
+                elif status_filter:
                     stmt = stmt.where(OrderModel.status == status_filter)
                 if zone_filter:
                     stmt = stmt.where(OrderModel.zone_code == zone_filter)
@@ -804,7 +908,10 @@ class ComercialService:
 
         # Sin sesión de base de datos (pruebas unitarias)
         orders = cls._orders_store
-        if status_filter:
+        if statuses_filter:
+            allowed_statuses = set(statuses_filter)
+            orders = [o for o in orders if o["status"] in allowed_statuses]
+        elif status_filter:
             orders = [o for o in orders if o["status"] == status_filter]
         if zone_filter:
             orders = [o for o in orders if o["zone_code"] == zone_filter]
@@ -854,6 +961,7 @@ class ComercialService:
         seller_user_id: str,
         seller_username: str,
         seller_full_name: Optional[str] = None,
+        creator_role: str = "vendedor",
         db: Optional[AsyncSession] = None,
     ) -> OrderResponse:
         """Crea y persiste un nuevo pedido de venta en Supabase PostgreSQL."""
@@ -875,11 +983,11 @@ class ComercialService:
 
         initial_status = "BORRADOR" if order_in.is_draft else "REGISTRADO"
         sex_pref = (order_in.sex_preference or "MACHO").upper().strip()
-        if sex_pref not in ("MACHO", "HEMBRA"):
+        if sex_pref not in ("MACHO", "HEMBRA", "MIXTO"):
             sex_pref = "MACHO"
 
         density = order_in.density_birds_per_cage or 8
-        if db is not None:
+        if db is not None and not order_in.order_lines:
             try:
                 from app.modules.admin.infrastructure.models import ZoneCageDensityModel
                 z_res = await db.execute(
@@ -893,36 +1001,79 @@ class ComercialService:
             except Exception as e:
                 print(f"[ComercialService] Aviso leyendo densidad de zona: {e}")
 
-        min_w = round(order_in.min_weight_kg, 2) if order_in.min_weight_kg is not None else 2.20
-        max_w = round(order_in.max_weight_kg, 2) if order_in.max_weight_kg is not None else 2.50
-        avg_weight = (min_w + max_w) / 2.0
-        est_kg = round(order_in.requested_quantity * avg_weight, 2)
-        est_cages = int(math.ceil(order_in.requested_quantity / density))
+        if order_in.order_lines and len(order_in.order_lines) > 0:
+            lines_summary = _normalize_order_lines(order_in.order_lines, fallback_density=density)
+            normalized_lines = lines_summary["lines"]
+            req_qty = lines_summary["requested_quantity"]
+            density = lines_summary["density_birds_per_cage"]
+            min_w = lines_summary["min_weight_kg"]
+            max_w = lines_summary["max_weight_kg"]
+            est_kg = lines_summary["estimated_total_kg"]
+            est_cages = lines_summary["estimated_cages"]
+            sex_pref = lines_summary["sex_preference"]
+        else:
+            req_qty = order_in.requested_quantity
+            min_w = round(order_in.min_weight_kg, 2) if order_in.min_weight_kg is not None else 2.20
+            max_w = round(order_in.max_weight_kg, 2) if order_in.max_weight_kg is not None else 2.50
+            avg_weight = (min_w + max_w) / 2.0
+            est_kg = round(req_qty * avg_weight, 2)
+            est_cages = int(math.ceil(req_qty / density))
+            normalized_lines = [_build_fallback_order_line(req_qty, density, sex_pref, min_w, max_w)]
 
-        # El nombre visible proviene del usuario autenticado (BD); sin mapeos fijos
-        display_name = (seller_full_name or "").strip() or seller_username
+        # El nombre visible proviene del vendedor seleccionado o del usuario autenticado (BD)
+        display_name = (order_in.seller_full_name or "").strip() or (seller_full_name or "").strip() or seller_username
 
         now_dt = datetime.utcnow()
         now_str = now_dt.isoformat() + "Z"
+        should_auto_reserve = bool(
+            getattr(order_in, "auto_reserve", False)
+            and creator_role in ("gestor_comercial", "gerente_comercial", "admin_sistema")
+            and order_in.suggested_farm_code
+            and order_in.suggested_barn_code
+            and not order_in.is_draft
+        )
+        effective_status = "APROBADO_RESERVADO" if should_auto_reserve else initial_status
+
         audit_entry = {
             "id": f"log-{uuid4().hex[:6]}",
-            "action": "CREADO",
+            "action": "APROBADO_RESERVADO" if should_auto_reserve else "CREADO",
             "actor_username": seller_username,
-            "actor_role": "vendedor",
+            "actor_role": creator_role,
             "timestamp": now_str,
-            "description": f"Pedido registrado formalmente por Comercial para {order_in.requested_quantity:,} aves.",
+            "description": (
+                f"Reserva directa programada en {order_in.suggested_farm_code} ({order_in.suggested_barn_code}) "
+                f"por {req_qty:,} aves."
+                if should_auto_reserve
+                else f"Pedido registrado formalmente por Comercial para {req_qty:,} aves."
+            ),
         }
+
+        # Fecha de saca (YYYY-MM-DD); si no se envía, usa fecha local Perú UTC-5
+        peru_today = datetime.now(timezone(timedelta(hours=-5))).date()
+        target_date_obj = peru_today
+        if order_in.target_delivery_date:
+            try:
+                target_date_obj = date.fromisoformat(order_in.target_delivery_date.strip()[:10])
+            except ValueError:
+                target_date_obj = peru_today
 
         # Persistencia en la base de datos (única fuente de verdad)
         if db is not None:
             try:
+                if should_auto_reserve:
+                    await cls._reserve_stock(
+                        db,
+                        order_in.suggested_farm_code,
+                        order_in.suggested_barn_code,
+                        req_qty,
+                        force=False,
+                        user_role=creator_role,
+                    )
+
                 # Contar pedidos para el secuencial
                 cnt_res = await db.execute(select(func.count(OrderModel.id)))
                 total_cnt = (cnt_res.scalar() or 0) + 1
                 order_num = f"PED-2026-{str(total_cnt).zfill(3)}"
-
-                # Fecha de creación del pedido (hora local Perú UTC-5; no editable por el vendedor)
-                target_date_obj = datetime.now(timezone(timedelta(hours=-5))).date()
 
                 client_uuid = None
                 if order_in.client_id:
@@ -948,19 +1099,21 @@ class ComercialService:
                     seller_full_name=display_name,
                     zone_code=order_in.zone_code,
                     target_delivery_date=target_date_obj,
-                    status=initial_status,
-                    requested_quantity=order_in.requested_quantity,
-                    allocated_quantity=0,
+                    status=effective_status,
+                    requested_quantity=req_qty,
+                    allocated_quantity=req_qty if should_auto_reserve else 0,
                     density_birds_per_cage=density,
                     min_weight_kg=min_w,
                     max_weight_kg=max_w,
                     sex_preference=sex_pref,
                     estimated_total_kg=est_kg,
                     estimated_cages=est_cages,
+                    order_lines=normalized_lines,
                     suggested_farm_code=order_in.suggested_farm_code,
                     suggested_barn_code=order_in.suggested_barn_code,
-                    assigned_farm_code=None,
-                    assigned_barn_code=None,
+                    assigned_farm_code=order_in.suggested_farm_code if should_auto_reserve else None,
+                    assigned_barn_code=order_in.suggested_barn_code if should_auto_reserve else None,
+                    gestor_username=seller_username if should_auto_reserve else None,
                     external_reference=order_in.external_reference,
                     notes=order_in.notes,
                     delivery_address=order_in.delivery_address or f"Punto de distribución - Zona {order_in.zone_code}",
@@ -975,24 +1128,44 @@ class ComercialService:
                 await db.commit()
                 await db.refresh(new_order_model)
 
-                await notify(
-                    db,
-                    category="gestion_comercial",
-                    type="aprobacion",
-                    title=f"Nuevo pedido {new_order_model.order_number}",
-                    description=(
-                        f"{new_order_model.client_name} solicitó "
-                        f"{new_order_model.requested_quantity:,} aves el "
-                        f"{target_date_obj.isoformat()} (zona {new_order_model.zone_code})."
-                    ),
-                    target_roles=["gestor_comercial", "gerente_comercial", "admin_sistema"],
-                    order_id=new_order_model.id,
-                    badge="Pedido nuevo",
-                )
+                if should_auto_reserve:
+                    await cls._notify_pecuaria_reserva(db, new_order_model)
+                    await notify(
+                        db,
+                        category="control_flota",
+                        type="transporte",
+                        title=f"Nueva reserva programada: {new_order_model.order_number}",
+                        description=(
+                            f"{new_order_model.client_name} (Zona {new_order_model.zone_code}) • "
+                            f"{new_order_model.allocated_quantity:,} aves en "
+                            f"{new_order_model.assigned_farm_code} ({new_order_model.assigned_barn_code}). Pendiente de camión."
+                        ),
+                        target_roles=["controlador_flota", "admin_sistema"],
+                        order_id=new_order_model.id,
+                        badge="Por asignar",
+                    )
+                elif not order_in.is_draft:
+                    await notify(
+                        db,
+                        category="gestion_comercial",
+                        type="aprobacion",
+                        title=f"Nuevo pedido {new_order_model.order_number}",
+                        description=(
+                            f"{new_order_model.client_name} solicitó "
+                            f"{new_order_model.requested_quantity:,} aves el "
+                            f"{target_date_obj.isoformat()} (zona {new_order_model.zone_code})."
+                        ),
+                        target_roles=["gestor_comercial", "gerente_comercial", "admin_sistema"],
+                        order_id=new_order_model.id,
+                        badge="Pedido nuevo",
+                    )
 
                 order_dict = _model_to_order_dict(new_order_model)
                 cls._orders_store.insert(0, order_dict)
                 return OrderResponse(**order_dict)
+            except HTTPException:
+                await db.rollback()
+                raise
             except Exception as e:
                 print(f"[ComercialService] Error guardando pedido en BD: {e}")
                 await db.rollback()
@@ -1015,7 +1188,7 @@ class ComercialService:
             "seller_full_name": display_name,
             "zone_code": order_in.zone_code,
             "target_delivery_date": datetime.now(timezone(timedelta(hours=-5))).date().isoformat(),
-            "requested_quantity": order_in.requested_quantity,
+            "requested_quantity": req_qty,
             "allocated_quantity": 0,
             "density_birds_per_cage": density,
             "min_weight_kg": min_w,
@@ -1023,6 +1196,7 @@ class ComercialService:
             "sex_preference": sex_pref,
             "estimated_total_kg": est_kg,
             "estimated_cages": est_cages,
+            "order_lines": normalized_lines,
             "suggested_farm_code": order_in.suggested_farm_code,
             "suggested_barn_code": order_in.suggested_barn_code,
             "assigned_farm_code": None,
@@ -1210,8 +1384,289 @@ class ComercialService:
             )
 
     # =========================================================================
-    # APROBACIÓN, OBSERVACIÓN Y CANCELACIÓN (GESTOR COMERCIAL)
+    # EDICIÓN CONTROLADA (PROGRAMACIÓN DE SACA) Y APROBACIÓN
     # =========================================================================
+    @classmethod
+    async def _notify_pecuaria_reserva(
+        cls,
+        db: Optional[AsyncSession],
+        order: "OrderModel",
+        action_label: str = "Reserva confirmada",
+    ) -> None:
+        """Notifica al área Pecuaria cada reserva o reasignación en granja y galpón."""
+        farm = order.assigned_farm_code
+        barn = order.assigned_barn_code
+        qty = order.allocated_quantity or order.requested_quantity or 0
+        if not farm or qty <= 0:
+            return
+
+        await notify(
+            db,
+            category="pecuaria",
+            type="reserva",
+            title=f"{action_label}: {farm} ({barn or '-'})",
+            description=(
+                f"Pedido {order.order_number} ({order.client_name}): "
+                f"{qty:,} aves reservadas en {farm} ({barn or '-'}) "
+                f"para saca el {order.target_delivery_date.isoformat()}."
+            ),
+            target_roles=["supervisor_pecuario", "registrador_pecuario", "admin_sistema"],
+            farm_code=farm,
+            order_id=order.id,
+            badge="Reserva",
+        )
+
+    @classmethod
+    async def update_order(
+        cls,
+        order_id: str,
+        order_in: OrderUpdateRequest,
+        user_role: str,
+        actor_username: str,
+        actor_user_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> OrderResponse:
+        """
+        Actualiza fecha de saca, granja/galpón, cantidad, densidad, pesos, sexo, líneas o notas.
+        El vendedor solo puede editar o enviar pedidos propios que estén en estado BORRADOR.
+        """
+        allowed_roles = ("vendedor", "gestor_comercial", "gerente_comercial", "admin_sistema")
+        if user_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tiene permisos para editar pedidos.",
+            )
+
+        if db is None:
+            raise HTTPException(status_code=503, detail="Base de datos no disponible.")
+
+        try:
+            try:
+                uuid_val = UUID(order_id)
+                stmt = select(OrderModel).where(or_(OrderModel.id == uuid_val, OrderModel.order_number == order_id))
+            except Exception:
+                stmt = select(OrderModel).where(OrderModel.order_number == order_id)
+
+            res = await db.execute(stmt)
+            m = res.scalar_one_or_none()
+            if not m:
+                raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
+
+            if user_role == "vendedor":
+                owner_id = str(m.seller_user_id) if m.seller_user_id else None
+                is_owner = (owner_id == actor_user_id) if (owner_id and actor_user_id) else (m.seller_username == actor_username)
+                if not is_owner:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pedido '{order_id}' no encontrado.")
+                if m.status != "BORRADOR":
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Solo puedes editar pedidos que aún están En borrador antes de enviarlos al Gestor Comercial.",
+                    )
+
+            if m.status in ("DESPACHADO", "CANCELADO"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"No se puede editar un pedido en estado {m.status}.",
+                )
+
+            sent_from_draft = False
+            if m.status == "BORRADOR" and order_in.is_draft is False:
+                m.status = "REGISTRADO"
+                sent_from_draft = True
+
+            if order_in.client_id is not None:
+                if order_in.client_id.strip():
+                    try:
+                        m.client_id = UUID(order_in.client_id.strip())
+                    except Exception:
+                        pass
+                else:
+                    m.client_id = None
+            if order_in.client_name is not None and order_in.client_name.strip():
+                m.client_name = order_in.client_name.strip()
+            if order_in.client_tax_id is not None:
+                m.client_tax_id = order_in.client_tax_id.strip() or None
+            if order_in.zone_code is not None and order_in.zone_code.strip():
+                m.zone_code = order_in.zone_code.strip().upper()
+            if order_in.seller_full_name is not None and order_in.seller_full_name.strip():
+                m.seller_full_name = order_in.seller_full_name.strip()
+            if order_in.seller_username is not None and order_in.seller_username.strip():
+                m.seller_username = order_in.seller_username.strip()
+            if order_in.delivery_address is not None:
+                m.delivery_address = order_in.delivery_address.strip() or None
+            if order_in.delivery_latitude is not None:
+                m.delivery_latitude = order_in.delivery_latitude
+            if order_in.delivery_longitude is not None:
+                m.delivery_longitude = order_in.delivery_longitude
+
+            lines_summary = None
+            if order_in.order_lines is not None and len(order_in.order_lines) > 0:
+                lines_summary = _normalize_order_lines(
+                    order_in.order_lines,
+                    fallback_density=order_in.density_birds_per_cage or m.density_birds_per_cage or 8,
+                )
+                new_min_w = lines_summary["min_weight_kg"]
+                new_max_w = lines_summary["max_weight_kg"]
+                m.sex_preference = lines_summary["sex_preference"]
+                m.density_birds_per_cage = lines_summary["density_birds_per_cage"]
+                m.order_lines = lines_summary["lines"]
+                flag_modified(m, "order_lines")
+            else:
+                new_min_w = round(order_in.min_weight_kg, 2) if order_in.min_weight_kg is not None else float(m.min_weight_kg)
+                new_max_w = round(order_in.max_weight_kg, 2) if order_in.max_weight_kg is not None else float(m.max_weight_kg)
+                if new_min_w > new_max_w:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"El peso mínimo ({new_min_w} kg) no puede ser mayor al máximo ({new_max_w} kg).",
+                    )
+                if order_in.sex_preference:
+                    sex_val = order_in.sex_preference.upper().strip()
+                    if sex_val in ("MACHO", "HEMBRA", "MIXTO", "INDISTINTO"):
+                        m.sex_preference = sex_val
+                m.density_birds_per_cage = order_in.density_birds_per_cage or m.density_birds_per_cage or 8
+
+            if order_in.target_delivery_date:
+                try:
+                    m.target_delivery_date = date.fromisoformat(order_in.target_delivery_date.strip()[:10])
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Formato de fecha de saca inválido (use YYYY-MM-DD).")
+
+            m.min_weight_kg = new_min_w
+            m.max_weight_kg = new_max_w
+            density = m.density_birds_per_cage or 8
+
+            if order_in.external_reference is not None:
+                m.external_reference = order_in.external_reference.strip() or None
+            if order_in.notes is not None:
+                m.notes = order_in.notes.strip() or None
+
+            lines_req_qty = lines_summary["requested_quantity"] if lines_summary else order_in.requested_quantity
+
+            if m.status == "APROBADO_RESERVADO":
+                old_farm = m.assigned_farm_code
+                old_barn = m.assigned_barn_code
+                old_qty = m.allocated_quantity or 0
+
+                new_farm = order_in.farm_code.strip() if order_in.farm_code else old_farm
+                new_barn = order_in.barn_code.strip() if order_in.barn_code else old_barn
+                new_qty = order_in.allocated_quantity or lines_req_qty or old_qty or m.requested_quantity
+
+                if (new_farm, new_barn, new_qty) != (old_farm, old_barn, old_qty):
+                    await cls._release_stock(db, old_farm, old_barn, old_qty)
+                    await cls._reserve_stock(
+                        db,
+                        new_farm,
+                        new_barn,
+                        new_qty,
+                        force=order_in.force_reservation,
+                        user_role=user_role,
+                    )
+                    m.assigned_farm_code = new_farm
+                    m.assigned_barn_code = new_barn
+                    m.allocated_quantity = new_qty
+
+                if lines_req_qty is not None:
+                    m.requested_quantity = lines_req_qty
+
+                basis_qty = m.allocated_quantity or m.requested_quantity
+            else:
+                if order_in.farm_code is not None:
+                    m.suggested_farm_code = order_in.farm_code.strip() or None
+                if order_in.barn_code is not None:
+                    m.suggested_barn_code = order_in.barn_code.strip() or None
+                if lines_req_qty is not None:
+                    m.requested_quantity = lines_req_qty
+                basis_qty = m.requested_quantity
+
+            if lines_summary is None:
+                existing_lines = list(m.order_lines or [])
+                if len(existing_lines) <= 1:
+                    m.order_lines = [_build_fallback_order_line(m.requested_quantity, density, m.sex_preference or "MACHO", float(m.min_weight_kg), float(m.max_weight_kg))]
+                    flag_modified(m, "order_lines")
+
+            if lines_summary is not None and m.status != "APROBADO_RESERVADO":
+                m.estimated_cages = lines_summary["estimated_cages"]
+                m.estimated_total_kg = lines_summary["estimated_total_kg"]
+            else:
+                avg_weight = (float(m.min_weight_kg) + float(m.max_weight_kg)) / 2.0
+                m.estimated_cages = (
+                    lines_summary["estimated_cages"]
+                    if lines_summary is not None and basis_qty == lines_summary["requested_quantity"]
+                    else int(math.ceil(basis_qty / density))
+                )
+                m.estimated_total_kg = round(basis_qty * avg_weight, 2)
+            if user_role != "vendedor":
+                m.gestor_username = actor_username
+            m.updated_at = datetime.utcnow()
+
+            current_log = list(m.audit_log or [])
+            current_log.append({
+                "id": f"log-{uuid4().hex[:6]}",
+                "action": "ENVIADO_A_PREPROGRAMACION" if sent_from_draft else "EDITADO",
+                "actor_username": actor_username,
+                "actor_role": user_role,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "description": (
+                    f"Pedido enviado a preprogramación desde borrador ({basis_qty:,} aves, fecha {m.target_delivery_date.isoformat()})."
+                    if sent_from_draft
+                    else (
+                        f"Borrador actualizado por vendedor ({basis_qty:,} aves, fecha {m.target_delivery_date.isoformat()})."
+                        if user_role == "vendedor"
+                        else f"Reserva actualizada en Programación de Saca ({basis_qty:,} aves, {m.assigned_farm_code or m.suggested_farm_code or '-'} {m.assigned_barn_code or m.suggested_barn_code or ''}, saca {m.target_delivery_date.isoformat()})."
+                    )
+                ),
+            })
+            m.audit_log = current_log
+            flag_modified(m, "audit_log")
+
+            await db.commit()
+            await db.refresh(m)
+
+            if sent_from_draft:
+                await notify(
+                    db,
+                    category="gestion_comercial",
+                    type="aprobacion",
+                    title=f"Nuevo pedido {m.order_number}",
+                    description=(
+                        f"{m.client_name} solicitó {m.requested_quantity:,} aves para el "
+                        f"{m.target_delivery_date.isoformat()} (zona {m.zone_code})."
+                    ),
+                    target_roles=["gestor_comercial", "gerente_comercial", "admin_sistema"],
+                    order_id=m.id,
+                    badge="Preprogramado",
+                )
+
+            if m.status == "APROBADO_RESERVADO" and m.assigned_farm_code:
+                await cls._notify_pecuaria_reserva(db, m, action_label="Reserva actualizada")
+
+            if m.transport_assigned:
+                await notify(
+                    db,
+                    category="control_flota",
+                    type="actualizacion",
+                    title=f"Reserva modificada: {m.order_number}",
+                    description=(
+                        f"{m.client_name}: saca {m.target_delivery_date.isoformat()}, "
+                        f"{basis_qty:,} aves en {m.assigned_farm_code} ({m.assigned_barn_code})."
+                    ),
+                    target_roles=["controlador_flota", "admin_sistema"],
+                    order_id=m.id,
+                    badge="Actualizado",
+                )
+
+            return OrderResponse(**_model_to_order_dict(m))
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            print(f"[ComercialService] Error actualizando reserva en BD: {e}")
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No se pudo actualizar la reserva en la base de datos.",
+            )
+
     @classmethod
     async def aprobar_pedido(
         cls,
@@ -1332,6 +1787,8 @@ class ComercialService:
                         order_id=m.id,
                         badge="Por asignar",
                     )
+
+                    await cls._notify_pecuaria_reserva(db, m)
 
                     order_dict = _model_to_order_dict(m)
                     return OrderResponse(**order_dict)
@@ -2012,10 +2469,11 @@ class ComercialService:
         order_id: str,
         user_role: str,
         username: str,
+        manual_code: Optional[str] = None,
         db: Optional[AsyncSession] = None,
     ) -> OrderResponse:
         """
-        Genera un código Aris único para el pedido.
+        Registra un código Aris manual o genera uno único para el pedido.
         Requisito: pedido aprobado/reservado con transporte asignado.
         """
         if user_role not in ("gestor_comercial", "gerente_comercial", "admin_sistema"):
@@ -2048,11 +2506,23 @@ class ComercialService:
                     if m.codigo_aris:
                         raise HTTPException(status_code=409, detail=f"El pedido ya tiene código Aris: {m.codigo_aris}.")
 
-                    # Generar código Aris único: AR-AAAA-NNNNN
-                    year_str = str(now_dt.year)
-                    cnt_res = await db.execute(select(func.count(OrderModel.id)))
-                    total_cnt = (cnt_res.scalar() or 0) + 1
-                    codigo = f"AR-{year_str}-{str(total_cnt).zfill(5)}"
+                    cleaned_manual = (manual_code or "").strip().upper()[:20]
+                    if cleaned_manual:
+                        dup_res = await db.execute(
+                            select(OrderModel.id).where(func.upper(OrderModel.codigo_aris) == cleaned_manual)
+                        )
+                        if dup_res.scalar_one_or_none() is not None:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=f"El código Aris '{cleaned_manual}' ya está asignado a otro pedido.",
+                            )
+                        codigo = cleaned_manual
+                    else:
+                        # Generar código Aris único: AR-AAAA-NNNNN
+                        year_str = str(now_dt.year)
+                        cnt_res = await db.execute(select(func.count(OrderModel.id)))
+                        total_cnt = (cnt_res.scalar() or 0) + 1
+                        codigo = f"AR-{year_str}-{str(total_cnt).zfill(5)}"
 
                     m.codigo_aris = codigo
                     m.codigo_aris_generated_at = now_dt
@@ -2181,7 +2651,7 @@ class ComercialService:
                         db,
                         category="comercial",
                         type="despacho",
-                        title=f"Camión en granja: {m.order_number}",
+                        title=f"Confirmado en granja: {m.order_number}",
                         description=(
                             f"El camión {m.transport_plate} llegó a {m.assigned_farm_code} "
                             f"para cargar el pedido de {m.client_name}."
@@ -2189,7 +2659,21 @@ class ComercialService:
                         target_roles=["vendedor"],
                         target_user_id=m.seller_user_id,
                         order_id=m.id,
-                        badge="En granja",
+                        badge="Confirmado",
+                    )
+
+                    await notify(
+                        db,
+                        category="gestion_comercial",
+                        type="despacho",
+                        title=f"Confirmado en granja: {m.order_number}",
+                        description=(
+                            f"Unidad {m.transport_plate} llegó a {m.assigned_farm_code} ({m.assigned_barn_code}). "
+                            f"Pedido de {m.client_name} confirmado para carga."
+                        ),
+                        target_roles=["gestor_comercial", "gerente_comercial"],
+                        order_id=m.id,
+                        badge="Confirmado",
                     )
 
                     return OrderResponse(**_model_to_order_dict(m))
@@ -2292,14 +2776,29 @@ class ComercialService:
                         db,
                         category="gestion_comercial",
                         type="entrega",
-                        title=f"{m.order_number}: en ruta",
+                        title=f"{m.order_number}: despachado en ruta",
                         description=(
                             f"Despacho de {m.client_name} en tránsito. "
                             f"Unidad: {m.transport_plate}."
                         ),
                         target_roles=["gestor_comercial", "gerente_comercial"],
                         order_id=m.id,
-                        badge="En ruta",
+                        badge="Despachado",
+                    )
+
+                    await notify(
+                        db,
+                        category="pecuaria",
+                        type="entrega",
+                        title=f"Saca física despachada: {m.assigned_farm_code} ({m.assigned_barn_code})",
+                        description=(
+                            f"Unidad {m.transport_plate} salió con {m.allocated_quantity:,} aves "
+                            f"del pedido {m.order_number} ({m.client_name})."
+                        ),
+                        target_roles=["supervisor_pecuario", "registrador_pecuario"],
+                        farm_code=m.assigned_farm_code,
+                        order_id=m.id,
+                        badge="Saca",
                     )
 
                     return OrderResponse(**_model_to_order_dict(m))
@@ -2380,15 +2879,29 @@ class ComercialService:
                         db,
                         category="comercial",
                         type="entrega",
-                        title=f"✅ {m.order_number} entregado",
+                        title=f"✅ {m.order_number} terminado",
                         description=(
-                            f"El pedido de {m.client_name} fue entregado conforme. "
+                            f"El pedido de {m.client_name} fue entregado conforme en destino. "
                             f"Unidad: {m.transport_plate}."
                         ),
                         target_roles=["vendedor"],
                         target_user_id=m.seller_user_id,
                         order_id=m.id,
-                        badge="Entregado",
+                        badge="Terminado",
+                    )
+
+                    await notify(
+                        db,
+                        category="gestion_comercial",
+                        type="entrega",
+                        title=f"✅ {m.order_number} terminado",
+                        description=(
+                            f"Entrega conforme completada para {m.client_name}. "
+                            f"Unidad: {m.transport_plate}."
+                        ),
+                        target_roles=["gestor_comercial", "gerente_comercial"],
+                        order_id=m.id,
+                        badge="Terminado",
                     )
 
                     return OrderResponse(**_model_to_order_dict(m))

@@ -306,6 +306,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
     )),
     estimated_cages INT NULL,
     estimated_total_kg NUMERIC(10,2) NULL,
+    order_lines JSONB NOT NULL DEFAULT '[]'::jsonb,
 
     -- Observaciones y Metadatos
     external_reference VARCHAR(100) NULL,
