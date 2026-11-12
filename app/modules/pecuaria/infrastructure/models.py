@@ -127,7 +127,8 @@ class BarnInventoryModel(Base):
     
     last_average_weight = Column(Numeric(5, 3), nullable=True)  # Peso promedio (x̄) en kg
     campaign = Column(String(20), nullable=False, default="208")
-    average_weight_g = Column(Numeric(8, 2), nullable=True)       # Peso promedio en gramos (con decimales)
+    average_weight_g = Column(Numeric(8, 2), nullable=True)       # Peso promedio en gramos (con decimales) - HOY
+    average_weight_yesterday_g = Column(Numeric(8, 2), nullable=True) # Peso promedio de ayer en gramos
     standard_weight_g = Column(Integer, nullable=True)            # Peso estándar objetivo en gramos
     version = Column(Integer, nullable=False, default=1)        # Control de concurrencia optimista
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

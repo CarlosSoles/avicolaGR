@@ -6,6 +6,7 @@
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -68,6 +69,22 @@ async def get_tabla_general_saldo(
         max_age=max_age,
         status=status,
     )
+
+
+@router.get(
+    "/ingestion-status",
+    summary="Estado de Ingesta y Actualizaciones de Pecuaria",
+)
+async def get_ingestion_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    res = await db.execute(text("SELECT MAX(updated_at) FROM public.barn_inventories"))
+    last_update = res.scalar()
+    return {
+        "last_update": last_update.isoformat() if last_update else None,
+        "status": "OPERATIONAL",
+    }
 
 
 # ==============================================================================

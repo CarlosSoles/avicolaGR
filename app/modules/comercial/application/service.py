@@ -1752,6 +1752,48 @@ class ComercialService:
                             "description": f"Densidad ajustada de {previous_density} a {density_to_apply} aves/jaula al aprobar el pedido.",
                             "details": {"previous_density": previous_density, "new_density": density_to_apply},
                         })
+
+                    # Dinámica de Galpones Mixtos: si el lote era MIXTO y el pedido exige MACHO o HEMBRA,
+                    # el sexo solicitado es vendido/extraído. El galpón pasa a reflejar el sexo remanente
+                    # y su peso promedio se actualiza al promedio del sexo que permanece en el galpón.
+                    if m.sex_preference in ("MACHO", "HEMBRA"):
+                        try:
+                            clean_bn = int(barn_to_assign.replace("G-", "") or "1") if "G-" in barn_to_assign else 1
+                            batch_q = await db.execute(
+                                text("""
+                                    SELECT bt.id, bt.sex, bi.average_weight_g
+                                    FROM public.barn_inventories bi
+                                    JOIN public.barns b ON bi.barn_id = b.id
+                                    JOIN public.farms f ON b.farm_id = f.id
+                                    JOIN public.batches bt ON bi.current_batch_id = bt.id
+                                    WHERE f.code = :fc AND (b.barn_number = :bn OR 'G-' || LPAD(b.barn_number::text, 2, '0') = :bc)
+                                """),
+                                {"fc": farm_to_assign, "bn": clean_bn, "bc": barn_to_assign}
+                            )
+                            b_row = batch_q.fetchone()
+                            if b_row and b_row[1] == "MIXTO":
+                                b_id, old_s, cur_avg = b_row[0], b_row[1], float(b_row[2] or 2500.0)
+                                remaining_sex = "HEMBRA" if m.sex_preference == "MACHO" else "MACHO"
+                                new_avg_g = (cur_avg - 90.0) if remaining_sex == "HEMBRA" else (cur_avg + 90.0)
+                                new_last_kg = round(new_avg_g / 1000.0, 3)
+
+                                await db.execute(
+                                    text("UPDATE public.batches SET sex = :s WHERE id = :id"),
+                                    {"s": remaining_sex, "id": b_id}
+                                )
+                                await db.execute(
+                                    text("""
+                                        UPDATE public.barn_inventories
+                                        SET average_weight_g = :avg_g,
+                                            last_average_weight = :last_kg,
+                                            updated_at = NOW()
+                                        WHERE current_batch_id = :id
+                                    """),
+                                    {"avg_g": new_avg_g, "last_kg": new_last_kg, "id": b_id}
+                                )
+                        except Exception as e:
+                            logger.warning(f"No se pudo ajustar sexo remanente de galpón mixto: {e}")
+
                     m.audit_log = current_log
                     flag_modified(m, "audit_log")
 

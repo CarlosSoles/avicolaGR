@@ -42,6 +42,8 @@ class TablaGeneralSaldoItemDTO(BaseModel):
     barn_balance_available: int = Field(description="Saldo por galpón disponible libre de compromisos")
     average_weight_kg: Optional[float] = Field(default=None, description="Peso promedio representativo en kg (x̄)")
     average_weight_g: Optional[float] = Field(default=None, description="Peso promedio representativo en gramos")
+    average_weight_today_g: Optional[float] = Field(default=None, description="Peso promedio hoy en gramos")
+    average_weight_yesterday_g: Optional[float] = Field(default=None, description="Peso promedio ayer en gramos")
     standard_weight_g: Optional[int] = Field(default=None, description="Peso estándar objetivo por edad y sexo en gramos")
     min_weight_kg: Optional[float] = Field(default=None, description="Peso mínimo registrado en la muestra")
     max_weight_kg: Optional[float] = Field(default=None, description="Peso máximo registrado en la muestra")

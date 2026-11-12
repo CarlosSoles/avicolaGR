@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import List, Optional
 from uuid import UUID
 import numpy as np
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -176,6 +176,12 @@ class PecuariaService:
                     barn_balance_available=inv.available_count,
                     average_weight_kg=avg_w,
                     average_weight_g=avg_g,
+                    average_weight_today_g=avg_g,
+                    average_weight_yesterday_g=(
+                        round(float(inv.average_weight_yesterday_g), 2)
+                        if inv.average_weight_yesterday_g is not None
+                        else None
+                    ),
                     standard_weight_g=std_weight_g,
                     min_weight_kg=min_w,
                     max_weight_kg=max_w,
@@ -328,6 +334,35 @@ class PecuariaService:
             barn.status = "CERRADO"
             # El saldo disponible es columna generada: el cierre se refleja por estado,
             # no modificando el inventario.
+
+            # Notificar al módulo de Pecuaria sobre el cierre del galpón
+            farm_res = await db.execute(select(FarmModel).where(FarmModel.id == barn.farm_id))
+            farm = farm_res.scalar_one_or_none()
+            farm_name = farm.name if farm else "Granja"
+            farm_code = farm.code if farm else "GR"
+            barn_label = f"G-{barn.barn_number:02d}"
+
+            await db.execute(
+                text("""
+                    INSERT INTO public.notifications (
+                        category, type, title, description, badge, target_roles, farm_code, created_at
+                    ) VALUES (
+                        'PECUARIA',
+                        'GALPON_CERRADO',
+                        :title,
+                        :description,
+                        'GALPÓN CERRADO',
+                        ARRAY['supervisor_pecuario', 'registrador_pecuario', 'admin_sistema']::text[],
+                        :farm_code,
+                        NOW()
+                    )
+                """),
+                {
+                    "title": f"Galpón {barn_label} cerrado",
+                    "description": f"El Gestor Comercial cerró formalmente el galpón {barn_label} en {farm_name} por término de saca.",
+                    "farm_code": farm_code,
+                },
+            )
 
             await log_audit_event(
                 db=db,
