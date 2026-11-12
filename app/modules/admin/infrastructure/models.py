@@ -8,6 +8,7 @@ import uuid
 from sqlalchemy import (
     Column,
     String,
+    Integer,
     Boolean,
     DateTime,
     ForeignKey,
@@ -35,7 +36,7 @@ class UserProfileModel(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "role IN ('admin_sistema', 'registrador_pecuario', 'supervisor_pecuario', 'vendedor', 'gestor_comercial', 'gerente_comercial')",
+            "role IN ('admin_sistema', 'registrador_pecuario', 'supervisor_pecuario', 'vendedor', 'gestor_comercial', 'gerente_comercial', 'controlador_flota')",
             name="chk_user_role"
         ),
     )
@@ -94,4 +95,21 @@ class UserScopeModel(Base):
             "scope_type IN ('GRANJA', 'GALPON', 'ZONA_COMERCIAL')",
             name="chk_user_scope_type"
         ),
+    )
+
+
+class ZoneCageDensityModel(Base):
+    """Densidad de carga por defecto (aves por jaula) configurada por zona y sexo."""
+    __tablename__ = "zone_cage_densities"
+
+    zone_code = Column(String(50), primary_key=True)
+    zone_name = Column(String(100), nullable=False)
+    male_density = Column(Integer, nullable=False)
+    female_density = Column(Integer, nullable=False)
+    updated_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users_profile.id"), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("male_density BETWEEN 7 AND 12", name="chk_zone_male_density"),
+        CheckConstraint("female_density BETWEEN 7 AND 12", name="chk_zone_female_density"),
     )

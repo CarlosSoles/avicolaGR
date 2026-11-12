@@ -128,7 +128,7 @@ async def create_batch(
     "/barns/{barn_id}/close",
     response_model=bool,
     summary="Cerrar un Galpón (ya no tiene venta y no aparecerá en la tabla)",
-    dependencies=[Depends(require_role(["supervisor_pecuario", "admin_sistema"]))],
+    dependencies=[Depends(require_role(["supervisor_pecuario", "gestor_comercial", "gerente_comercial", "admin_sistema"]))],
 )
 async def close_barn(
     barn_id: UUID,

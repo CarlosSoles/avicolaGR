@@ -126,12 +126,24 @@ class BarnInventoryModel(Base):
     )
     
     last_average_weight = Column(Numeric(5, 3), nullable=True)  # Peso promedio (x̄) en kg
+    campaign = Column(String(20), nullable=False, default="208")
+    average_weight_g = Column(Numeric(8, 2), nullable=True)       # Peso promedio en gramos (con decimales)
+    standard_weight_g = Column(Integer, nullable=True)            # Peso estándar objetivo en gramos
     version = Column(Integer, nullable=False, default=1)        # Control de concurrencia optimista
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relaciones
     barn = relationship("BarnModel", back_populates="inventory")
     batch = relationship("BatchModel")
+
+
+class PoultryWeightStandardModel(Base):
+    """Curva de peso estándar objetivo (g) por edad en días y sexo."""
+    __tablename__ = "poultry_weight_standards"
+
+    age_days = Column(Integer, primary_key=True)
+    sex = Column(String(10), primary_key=True)
+    standard_weight_g = Column(Integer, nullable=False)
 
 
 class WeighingSampleModel(Base):

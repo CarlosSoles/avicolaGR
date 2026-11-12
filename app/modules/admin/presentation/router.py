@@ -24,6 +24,8 @@ from app.modules.admin.domain.schemas import (
     UserProfileResponse,
     FarmCatalogItem,
     FarmCoordinatesUpdate,
+    ZoneCageDensityItem,
+    ZoneCageDensitiesUpdateRequest,
 )
 
 # Router para autenticación
@@ -316,4 +318,33 @@ async def update_farm_coordinates(
 ):
     service = AdminService(db)
     return await service.update_farm_coordinates(farm_code, coords.latitude, coords.longitude)
+
+
+@admin_router.get(
+    "/zone-densities",
+    response_model=List[ZoneCageDensityItem],
+    summary="Listar Densidades de Carga por Zona y Sexo",
+    description="Retorna la densidad por defecto (aves/jaula) para Machos y Hembras por zona comercial.",
+)
+async def list_zone_densities(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = AdminService(db)
+    return await service.list_zone_densities()
+
+
+@admin_router.put(
+    "/zone-densities",
+    response_model=List[ZoneCageDensityItem],
+    summary="Actualizar Densidades de Carga por Zona y Sexo",
+    description="Exclusivo para el Administrador del Sistema. Guarda las densidades por defecto de cada zona.",
+)
+async def update_zone_densities(
+    dto: ZoneCageDensitiesUpdateRequest,
+    current_user: AuthenticatedUser = Depends(require_role(["admin_sistema"])),
+    db: AsyncSession = Depends(get_db),
+):
+    service = AdminService(db)
+    return await service.update_zone_densities(dto.densities, current_user.id)
 

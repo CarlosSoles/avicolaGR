@@ -69,3 +69,24 @@ class FarmCoordinatesUpdate(BaseModel):
     latitude: Optional[float] = Field(None, ge=-90, le=90, description="Latitud WGS84")
     longitude: Optional[float] = Field(None, ge=-180, le=180, description="Longitud WGS84")
 
+
+class ZoneCageDensityItem(BaseModel):
+    zone_code: str
+    zone_name: str
+    male_density: int = Field(..., ge=7, le=12, description="Densidad machos (aves por jaula, 7-12)")
+    female_density: int = Field(..., ge=7, le=12, description="Densidad hembras (aves por jaula, 7-12)")
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ZoneCageDensityUpdateItem(BaseModel):
+    zone_code: str
+    male_density: int = Field(..., ge=7, le=12)
+    female_density: int = Field(..., ge=7, le=12)
+
+
+class ZoneCageDensitiesUpdateRequest(BaseModel):
+    densities: List[ZoneCageDensityUpdateItem] = Field(..., min_length=1)
+

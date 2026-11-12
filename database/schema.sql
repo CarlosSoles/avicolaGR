@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS public.users_profile (
         'supervisor_pecuario',
         'vendedor',
         'gestor_comercial',
-        'gerente_comercial'
+        'gerente_comercial',
+        'controlador_flota'
     )),
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -136,9 +137,28 @@ CREATE TABLE IF NOT EXISTS public.barn_inventories (
         physical_count - specials_count - reserved_count - sold_pending_count
     ) STORED,
     last_average_weight NUMERIC(5,3) NULL,
+    campaign VARCHAR(20) NOT NULL DEFAULT '208',
+    average_weight_g NUMERIC(8,2) NULL,
+    standard_weight_g INT NULL,
     version INT NOT NULL DEFAULT 1,
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT chk_positive_available CHECK (available_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS public.poultry_weight_standards (
+    age_days INT NOT NULL CHECK (age_days >= 1 AND age_days <= 90),
+    sex VARCHAR(10) NOT NULL CHECK (sex IN ('MACHO', 'HEMBRA')),
+    standard_weight_g INT NOT NULL CHECK (standard_weight_g > 0),
+    PRIMARY KEY (age_days, sex)
+);
+
+CREATE TABLE IF NOT EXISTS public.zone_cage_densities (
+    zone_code VARCHAR(50) PRIMARY KEY,
+    zone_name VARCHAR(100) NOT NULL,
+    male_density INT NOT NULL CHECK (male_density BETWEEN 7 AND 12),
+    female_density INT NOT NULL CHECK (female_density BETWEEN 7 AND 12),
+    updated_by_user_id UUID REFERENCES public.users_profile(id),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TRIGGER trg_barn_inventories_updated_at
@@ -209,12 +229,16 @@ CREATE TABLE IF NOT EXISTS public.physical_movements (
 CREATE TABLE IF NOT EXISTS public.transport_vehicles (
     id VARCHAR(50) PRIMARY KEY, -- Ej: 'VH-001'
     plate VARCHAR(20) NOT NULL UNIQUE,
-    driver_name VARCHAR(150) NOT NULL,
-    driver_phone VARCHAR(50) NOT NULL,
-    shift VARCHAR(50) DEFAULT 'Madrugada (02:00 - 08:00)',
+    model VARCHAR(100) NULL,
+    capacity_cages INT NOT NULL DEFAULT 450,
     capacity_birds INT NOT NULL DEFAULT 4000,
     capacity_kg NUMERIC(10,2) NOT NULL DEFAULT 10000.00,
-    status VARCHAR(30) DEFAULT 'DISPONIBLE' CHECK (status IN ('DISPONIBLE', 'EN_TRANSITO', 'EN_MANTENIMIENTO')),
+    driver_name VARCHAR(150) NOT NULL,
+    driver_phone VARCHAR(50) NOT NULL,
+    default_crew VARCHAR(100) NULL,
+    shift VARCHAR(50) DEFAULT 'Madrugada (02:00 - 08:00)',
+    zone_coverage JSONB DEFAULT '[]'::jsonb,
+    status VARCHAR(30) DEFAULT 'DISPONIBLE' CHECK (status IN ('DISPONIBLE', 'ASIGNADO', 'EN_TRANSITO', 'EN_MANTENIMIENTO')),
     current_zone VARCHAR(50) DEFAULT 'CENTRO',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );

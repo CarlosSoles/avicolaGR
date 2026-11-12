@@ -6,7 +6,7 @@
 import math
 from typing import List, Optional, Dict, Any
 from uuid import uuid4, UUID
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func, text
@@ -22,6 +22,8 @@ from app.modules.comercial.domain.schemas import (
     ProgramacionTransporteItem,
     ProgramacionTransporteResponse,
     TransportVehicle,
+    TransportVehicleCreate,
+    TransportVehicleUpdate,
     AssignTransportRequest,
 )
 from app.modules.comercial.infrastructure.models import (
@@ -219,6 +221,9 @@ INITIAL_ORDERS = [
         "loading_slot_time": "03:00 - 05:00 hrs",
         "dispatch_phase": "EN_GRANJA_CARGANDO",
         "dispatch_phase_updated_at": "2026-11-01T09:35:00Z",
+        "codigo_aris": "AR-2026-001",
+        "codigo_aris_generated_at": "2026-11-01T09:20:00Z",
+        "codigo_aris_generated_by": "gestor1",
         "audit_log": [
             {
                 "id": "log-001",
@@ -300,6 +305,9 @@ def _model_to_order_dict(model: OrderModel) -> Dict[str, Any]:
         "loading_slot_time": model.loading_slot_time,
         "dispatch_phase": model.dispatch_phase,
         "dispatch_phase_updated_at": model.dispatch_phase_updated_at.isoformat() + "Z" if model.dispatch_phase_updated_at else None,
+        "codigo_aris": model.codigo_aris,
+        "codigo_aris_generated_at": model.codigo_aris_generated_at.isoformat() + "Z" if model.codigo_aris_generated_at else None,
+        "codigo_aris_generated_by": model.codigo_aris_generated_by,
         "audit_log": model.audit_log or [],
         "is_split_parent": bool(model.is_split_parent),
         "is_split_child": bool(model.is_split_child),
@@ -374,6 +382,197 @@ class ComercialService:
 
         # Sin sesión de base de datos (pruebas unitarias)
         return [TransportVehicle(**v) for v in cls._vehicles_store]
+
+    @classmethod
+    async def create_transport_vehicle(
+        cls,
+        vehicle_in: TransportVehicleCreate,
+        user_role: str,
+        db: Optional[AsyncSession] = None,
+    ) -> TransportVehicle:
+        """Registra una nueva unidad de transporte en la Flota de Distribución."""
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Controlador de Flota o Administrador puede registrar unidades de transporte.",
+            )
+
+        clean_plate = vehicle_in.plate.strip().upper()
+        valid_statuses = ("DISPONIBLE", "ASIGNADO", "EN_MANTENIMIENTO")
+        clean_status = vehicle_in.status if vehicle_in.status in valid_statuses else "DISPONIBLE"
+        birds_cap = vehicle_in.capacity_birds or (vehicle_in.capacity_cages * 8)
+        zones = [z.strip().upper() for z in (vehicle_in.zone_coverage or []) if z.strip()]
+        if not zones:
+            zones = ["NORTE", "CENTRO", "SUR", "METROPOLITANA"]
+
+        if db is not None:
+            dup = await db.execute(
+                select(TransportVehicleModel).where(func.upper(TransportVehicleModel.plate) == clean_plate)
+            )
+            if dup.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Ya existe un transporte registrado con la placa '{clean_plate}'.",
+                )
+
+            # Generar siguiente ID correlativo VH-XXX
+            all_ids_res = await db.execute(select(TransportVehicleModel.id))
+            max_num = 0
+            for (vid,) in all_ids_res.fetchall():
+                if isinstance(vid, str) and vid.startswith("VH-"):
+                    try:
+                        max_num = max(max_num, int(vid.split("-")[1]))
+                    except Exception:
+                        pass
+            new_id = f"VH-{max_num + 1:03d}"
+
+            new_model = TransportVehicleModel(
+                id=new_id,
+                plate=clean_plate,
+                model=vehicle_in.model.strip(),
+                capacity_cages=vehicle_in.capacity_cages,
+                capacity_birds=birds_cap,
+                driver_name=vehicle_in.driver_name.strip(),
+                driver_phone=(vehicle_in.driver_phone or "").strip(),
+                default_crew=(vehicle_in.default_crew or "Cuadrilla Oficial").strip(),
+                shift="Madrugada (02:00 - 08:00)",
+                zone_coverage=zones,
+                status=clean_status,
+                created_at=datetime.utcnow(),
+            )
+            db.add(new_model)
+            await db.commit()
+            await db.refresh(new_model)
+            return TransportVehicle(**_model_to_vehicle_dict(new_model))
+
+        # Respaldo sin BD
+        if any(v["plate"].upper() == clean_plate for v in cls._vehicles_store):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Ya existe un transporte con la placa '{clean_plate}'.",
+            )
+        new_id = f"VH-{len(cls._vehicles_store) + 1:03d}"
+        new_dict = {
+            "id": new_id,
+            "plate": clean_plate,
+            "model": vehicle_in.model.strip(),
+            "capacity_cages": vehicle_in.capacity_cages,
+            "capacity_birds": birds_cap,
+            "driver_name": vehicle_in.driver_name.strip(),
+            "driver_phone": (vehicle_in.driver_phone or "").strip(),
+            "default_crew": (vehicle_in.default_crew or "Cuadrilla Oficial").strip(),
+            "zone_coverage": zones,
+            "status": clean_status,
+        }
+        cls._vehicles_store.append(new_dict)
+        return TransportVehicle(**new_dict)
+
+    @classmethod
+    async def update_transport_vehicle(
+        cls,
+        vehicle_id: str,
+        vehicle_in: TransportVehicleUpdate,
+        user_role: str,
+        db: Optional[AsyncSession] = None,
+    ) -> TransportVehicle:
+        """Actualiza los datos de un vehículo de transporte de distribución."""
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Controlador de Flota o Administrador puede editar unidades de transporte.",
+            )
+
+        valid_statuses = ("DISPONIBLE", "ASIGNADO", "EN_MANTENIMIENTO")
+
+        if db is not None:
+            res = await db.execute(select(TransportVehicleModel).where(TransportVehicleModel.id == vehicle_id))
+            m = res.scalar_one_or_none()
+            if not m:
+                raise HTTPException(status_code=404, detail=f"Unidad de transporte '{vehicle_id}' no encontrada.")
+
+            if vehicle_in.plate is not None:
+                clean_plate = vehicle_in.plate.strip().upper()
+                if clean_plate != m.plate.upper():
+                    dup = await db.execute(
+                        select(TransportVehicleModel).where(
+                            func.upper(TransportVehicleModel.plate) == clean_plate,
+                            TransportVehicleModel.id != vehicle_id,
+                        )
+                    )
+                    if dup.scalar_one_or_none():
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Ya existe otro vehículo con la placa '{clean_plate}'.",
+                        )
+                m.plate = clean_plate
+            if vehicle_in.model is not None:
+                m.model = vehicle_in.model.strip()
+            if vehicle_in.capacity_cages is not None:
+                m.capacity_cages = vehicle_in.capacity_cages
+                if vehicle_in.capacity_birds is None:
+                    m.capacity_birds = vehicle_in.capacity_cages * 8
+            if vehicle_in.capacity_birds is not None:
+                m.capacity_birds = vehicle_in.capacity_birds
+            if vehicle_in.driver_name is not None:
+                m.driver_name = vehicle_in.driver_name.strip()
+            if vehicle_in.driver_phone is not None:
+                m.driver_phone = vehicle_in.driver_phone.strip()
+            if vehicle_in.default_crew is not None:
+                m.default_crew = vehicle_in.default_crew.strip()
+            if vehicle_in.zone_coverage is not None:
+                zones = [z.strip().upper() for z in vehicle_in.zone_coverage if z.strip()]
+                if zones:
+                    m.zone_coverage = zones
+                    flag_modified(m, "zone_coverage")
+            if vehicle_in.status is not None and vehicle_in.status in valid_statuses:
+                m.status = vehicle_in.status
+
+            await db.commit()
+            await db.refresh(m)
+            return TransportVehicle(**_model_to_vehicle_dict(m))
+
+        raise HTTPException(status_code=404, detail=f"Unidad '{vehicle_id}' no encontrada.")
+
+    @classmethod
+    async def delete_transport_vehicle(
+        cls,
+        vehicle_id: str,
+        user_role: str,
+        db: Optional[AsyncSession] = None,
+    ) -> dict:
+        """Elimina una unidad de transporte siempre que no tenga pedidos activos asignados."""
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Controlador de Flota o Administrador puede eliminar unidades de transporte.",
+            )
+
+        if db is not None:
+            res = await db.execute(select(TransportVehicleModel).where(TransportVehicleModel.id == vehicle_id))
+            m = res.scalar_one_or_none()
+            if not m:
+                raise HTTPException(status_code=404, detail=f"Unidad '{vehicle_id}' no encontrada.")
+
+            active_res = await db.execute(
+                select(OrderModel.order_number).where(
+                    OrderModel.transport_assigned == True,
+                    OrderModel.transport_truck_id == vehicle_id,
+                    OrderModel.status == "APROBADO_RESERVADO",
+                )
+            )
+            active_orders = [r[0] for r in active_res.fetchall()]
+            if active_orders:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"No se puede eliminar la unidad {m.plate}: tiene pedidos activos asignados ({', '.join(active_orders)}).",
+                )
+
+            plate_removed = m.plate
+            await db.delete(m)
+            await db.commit()
+            return {"detail": f"Unidad {plate_removed} ({vehicle_id}) eliminada de la flota."}
+
+        raise HTTPException(status_code=404, detail=f"Unidad '{vehicle_id}' no encontrada.")
 
     # =========================================================================
     # CLIENTES
@@ -658,7 +857,11 @@ class ComercialService:
         db: Optional[AsyncSession] = None,
     ) -> OrderResponse:
         """Crea y persiste un nuevo pedido de venta en Supabase PostgreSQL."""
-        if order_in.min_weight_kg > order_in.max_weight_kg:
+        if (
+            order_in.min_weight_kg is not None
+            and order_in.max_weight_kg is not None
+            and order_in.min_weight_kg > order_in.max_weight_kg
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"El peso mínimo ({order_in.min_weight_kg} kg) no puede ser mayor al peso máximo ({order_in.max_weight_kg} kg).",
@@ -671,8 +874,28 @@ class ComercialService:
             )
 
         initial_status = "BORRADOR" if order_in.is_draft else "REGISTRADO"
+        sex_pref = (order_in.sex_preference or "MACHO").upper().strip()
+        if sex_pref not in ("MACHO", "HEMBRA"):
+            sex_pref = "MACHO"
+
         density = order_in.density_birds_per_cage or 8
-        avg_weight = (order_in.min_weight_kg + order_in.max_weight_kg) / 2.0
+        if db is not None:
+            try:
+                from app.modules.admin.infrastructure.models import ZoneCageDensityModel
+                z_res = await db.execute(
+                    select(ZoneCageDensityModel).where(
+                        func.upper(ZoneCageDensityModel.zone_code) == (order_in.zone_code or "METROPOLITANA").upper().strip()
+                    )
+                )
+                zone_cfg = z_res.scalar_one_or_none()
+                if zone_cfg:
+                    density = zone_cfg.female_density if sex_pref == "HEMBRA" else zone_cfg.male_density
+            except Exception as e:
+                print(f"[ComercialService] Aviso leyendo densidad de zona: {e}")
+
+        min_w = round(order_in.min_weight_kg, 2) if order_in.min_weight_kg is not None else 2.20
+        max_w = round(order_in.max_weight_kg, 2) if order_in.max_weight_kg is not None else 2.50
+        avg_weight = (min_w + max_w) / 2.0
         est_kg = round(order_in.requested_quantity * avg_weight, 2)
         est_cages = int(math.ceil(order_in.requested_quantity / density))
 
@@ -698,11 +921,8 @@ class ComercialService:
                 total_cnt = (cnt_res.scalar() or 0) + 1
                 order_num = f"PED-2026-{str(total_cnt).zfill(3)}"
 
-                # Convertir delivery_date a date object
-                try:
-                    target_date_obj = date.fromisoformat(order_in.target_delivery_date)
-                except Exception:
-                    target_date_obj = date.today()
+                # Fecha de creación del pedido (hora local Perú UTC-5; no editable por el vendedor)
+                target_date_obj = datetime.now(timezone(timedelta(hours=-5))).date()
 
                 client_uuid = None
                 if order_in.client_id:
@@ -732,9 +952,9 @@ class ComercialService:
                     requested_quantity=order_in.requested_quantity,
                     allocated_quantity=0,
                     density_birds_per_cage=density,
-                    min_weight_kg=round(order_in.min_weight_kg, 2),
-                    max_weight_kg=round(order_in.max_weight_kg, 2),
-                    sex_preference=order_in.sex_preference or "INDISTINTO",
+                    min_weight_kg=min_w,
+                    max_weight_kg=max_w,
+                    sex_preference=sex_pref,
                     estimated_total_kg=est_kg,
                     estimated_cages=est_cages,
                     suggested_farm_code=order_in.suggested_farm_code,
@@ -762,8 +982,8 @@ class ComercialService:
                     title=f"Nuevo pedido {new_order_model.order_number}",
                     description=(
                         f"{new_order_model.client_name} solicitó "
-                        f"{new_order_model.requested_quantity:,} aves para el "
-                        f"{order_in.target_delivery_date} (zona {new_order_model.zone_code})."
+                        f"{new_order_model.requested_quantity:,} aves el "
+                        f"{target_date_obj.isoformat()} (zona {new_order_model.zone_code})."
                     ),
                     target_roles=["gestor_comercial", "gerente_comercial", "admin_sistema"],
                     order_id=new_order_model.id,
@@ -794,13 +1014,13 @@ class ComercialService:
             "seller_username": seller_username,
             "seller_full_name": display_name,
             "zone_code": order_in.zone_code,
-            "target_delivery_date": order_in.target_delivery_date,
+            "target_delivery_date": datetime.now(timezone(timedelta(hours=-5))).date().isoformat(),
             "requested_quantity": order_in.requested_quantity,
             "allocated_quantity": 0,
             "density_birds_per_cage": density,
-            "min_weight_kg": round(order_in.min_weight_kg, 2),
-            "max_weight_kg": round(order_in.max_weight_kg, 2),
-            "sex_preference": getattr(order_in, "sex_preference", "INDISTINTO") or "INDISTINTO",
+            "min_weight_kg": min_w,
+            "max_weight_kg": max_w,
+            "sex_preference": sex_pref,
             "estimated_total_kg": est_kg,
             "estimated_cages": est_cages,
             "suggested_farm_code": order_in.suggested_farm_code,
@@ -1099,6 +1319,20 @@ class ComercialService:
                         badge="Aprobado",
                     )
 
+                    await notify(
+                        db,
+                        category="control_flota",
+                        type="transporte",
+                        title=f"Nuevo pedido programado: {m.order_number}",
+                        description=(
+                            f"{m.client_name} (Zona {m.zone_code}) • {qty_to_assign:,} aves "
+                            f"en {farm_to_assign} ({barn_to_assign}). Pendiente de asignar camión."
+                        ),
+                        target_roles=["controlador_flota", "admin_sistema"],
+                        order_id=m.id,
+                        badge="Por asignar",
+                    )
+
                     order_dict = _model_to_order_dict(m)
                     return OrderResponse(**order_dict)
             except HTTPException:
@@ -1287,9 +1521,12 @@ class ComercialService:
         db: Optional[AsyncSession] = None,
     ) -> OrderResponse:
         """Designa vehículo y conductor a un pedido formalmente aprobado."""
-        allowed_roles = ["gestor_comercial", "gerente_comercial", "admin_sistema"]
+        allowed_roles = ["controlador_flota", "admin_sistema"]
         if user_role not in allowed_roles:
-            raise HTTPException(status_code=403, detail="Solo el Gestor Comercial puede asignar transporte.")
+            raise HTTPException(
+                status_code=403,
+                detail="Solo el Controlador de Flota puede asignar unidades de transporte.",
+            )
 
         now_dt = datetime.utcnow()
         now_str = now_dt.isoformat() + "Z"
@@ -1305,6 +1542,20 @@ class ComercialService:
                 res = await db.execute(stmt)
                 m = res.scalar_one_or_none()
                 if m:
+                    # ==========================================================
+                    # REGLA DE NEGOCIO: Un pedido no puede ir en 2 camiones.
+                    # Si ya tiene transporte asignado, se debe liberar primero.
+                    # ==========================================================
+                    if m.transport_assigned and m.transport_truck_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=(
+                                f"El pedido {m.order_number} ya tiene asignado el camión "
+                                f"{m.transport_plate or m.transport_truck_id}. "
+                                "Debe liberar el transporte actual antes de asignar una nueva unidad."
+                            ),
+                        )
+
                     # Enriquecer con los datos de la unidad seleccionada
                     vehicle = None
                     if transport_req.vehicle_id:
@@ -1364,6 +1615,21 @@ class ComercialService:
                         badge="En ruta",
                     )
 
+                    await notify(
+                        db,
+                        category="gestion_comercial",
+                        type="entrega",
+                        title=f"Camión asignado a {m.order_number}",
+                        description=(
+                            f"Control de Flota designó {plate or transport_req.vehicle_id}"
+                            f"{(' · ' + driver_name) if driver_name else ''} "
+                            f"(Turno {m.transport_shift or 'Madrugada'})."
+                        ),
+                        target_roles=["gestor_comercial", "gerente_comercial"],
+                        order_id=m.id,
+                        badge="Flota asignada",
+                    )
+
                     return OrderResponse(**_model_to_order_dict(m))
             except Exception as e:
                 print(f"[ComercialService] Error asignando transporte en BD: {e}")
@@ -1400,6 +1666,11 @@ class ComercialService:
         db: Optional[AsyncSession] = None,
     ) -> OrderResponse:
         """Libera la designación de transporte de un pedido."""
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=403,
+                detail="Solo el Controlador de Flota puede liberar unidades de transporte.",
+            )
         if db:
             try:
                 try:
@@ -1414,7 +1685,14 @@ class ComercialService:
                     m.transport_assigned = False
                     m.transport_truck_id = None
                     m.transport_plate = None
+                    m.transport_model = None
                     m.transport_driver_name = None
+                    m.transport_driver_phone = None
+                    m.transport_crew = None
+                    m.transport_shift = None
+                    m.transport_capacity_cages = None
+                    m.transport_notes = None
+                    m.loading_slot_time = None
                     m.dispatch_phase = None
                     m.updated_at = datetime.utcnow()
                     await db.commit()
@@ -1510,6 +1788,20 @@ class ComercialService:
                             order_id=m.id,
                             badge="Entrega",
                         )
+
+                    await notify(
+                        db,
+                        category="gestion_comercial",
+                        type="entrega",
+                        title=f"{m.order_number}: {dispatch_phase.replace('_', ' ').title()}",
+                        description=(
+                            f"Actualización de ruta para {m.client_name} "
+                            f"({m.transport_plate or 'unidad asignada'})."
+                        ),
+                        target_roles=["gestor_comercial", "gerente_comercial"],
+                        order_id=m.id,
+                        badge="Estado GPS",
+                    )
 
                     return OrderResponse(**_model_to_order_dict(m))
             except Exception as e:
@@ -1709,3 +2001,401 @@ class ComercialService:
             estimated_trucks=estimated_trucks,
             items=items,
         )
+
+    # =========================================================================
+    # CICLO DE VIDA DEL PEDIDO: CÓDIGO ARIS + CONFIRMACIONES
+    # =========================================================================
+
+    @classmethod
+    async def generar_codigo_aris(
+        cls,
+        order_id: str,
+        user_role: str,
+        username: str,
+        db: Optional[AsyncSession] = None,
+    ) -> OrderResponse:
+        """
+        Genera un código Aris único para el pedido.
+        Requisito: pedido aprobado/reservado con transporte asignado.
+        """
+        if user_role not in ("gestor_comercial", "gerente_comercial", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Gestor Comercial puede generar el código Aris.",
+            )
+
+        now_dt = datetime.utcnow()
+        now_str = now_dt.isoformat() + "Z"
+
+        if db:
+            try:
+                try:
+                    uuid_val = UUID(order_id)
+                    stmt = select(OrderModel).where(or_(OrderModel.id == uuid_val, OrderModel.order_number == order_id))
+                except Exception:
+                    stmt = select(OrderModel).where(OrderModel.order_number == order_id)
+
+                res = await db.execute(stmt)
+                m = res.scalar_one_or_none()
+                if m:
+                    # Validaciones de negocio
+                    if m.status == "CANCELADO":
+                        raise HTTPException(status_code=400, detail="No se puede generar código Aris para un pedido cancelado.")
+                    if m.status != "APROBADO_RESERVADO":
+                        raise HTTPException(status_code=400, detail="El pedido debe estar aprobado y reservado para generar código Aris.")
+                    if not m.transport_assigned:
+                        raise HTTPException(status_code=400, detail="El pedido debe tener un camión asignado antes de generar el código Aris.")
+                    if m.codigo_aris:
+                        raise HTTPException(status_code=409, detail=f"El pedido ya tiene código Aris: {m.codigo_aris}.")
+
+                    # Generar código Aris único: AR-AAAA-NNNNN
+                    year_str = str(now_dt.year)
+                    cnt_res = await db.execute(select(func.count(OrderModel.id)))
+                    total_cnt = (cnt_res.scalar() or 0) + 1
+                    codigo = f"AR-{year_str}-{str(total_cnt).zfill(5)}"
+
+                    m.codigo_aris = codigo
+                    m.codigo_aris_generated_at = now_dt
+                    m.codigo_aris_generated_by = username
+                    m.updated_at = now_dt
+
+                    # Audit log
+                    current_log = list(m.audit_log or [])
+                    current_log.append({
+                        "id": f"log-{uuid4().hex[:6]}",
+                        "action": "CODIGO_ARIS_GENERADO",
+                        "actor_username": username,
+                        "actor_role": user_role,
+                        "timestamp": now_str,
+                        "description": f"Código Aris {codigo} generado para el pedido.",
+                    })
+                    m.audit_log = current_log
+                    flag_modified(m, "audit_log")
+
+                    await db.commit()
+                    await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="aris",
+                        title=f"Código Aris generado: {codigo}",
+                        description=(
+                            f"El Gestor Comercial generó el código Aris {codigo} "
+                            f"para el pedido {m.order_number} de {m.client_name}."
+                        ),
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="Aris",
+                    )
+
+                    await notify(
+                        db,
+                        category="control_flota",
+                        type="aris",
+                        title=f"Pedido {m.order_number} listo para carga",
+                        description=(
+                            f"Código Aris {codigo} asignado. "
+                            f"Cliente: {m.client_name}, Granja: {m.assigned_farm_code}."
+                        ),
+                        target_roles=["controlador_flota", "admin_sistema"],
+                        order_id=m.id,
+                        badge="Listo para carga",
+                    )
+
+                    return OrderResponse(**_model_to_order_dict(m))
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[ComercialService] Error generando código Aris: {e}")
+                await db.rollback()
+
+        raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
+
+    @classmethod
+    async def confirmar_llegada_granja(
+        cls,
+        order_id: str,
+        user_role: str,
+        username: str,
+        req: Any,
+        db: Optional[AsyncSession] = None,
+    ) -> OrderResponse:
+        """
+        El Controlador de Flota confirma que el camión llegó a la granja.
+        dispatch_phase → EN_GRANJA_CARGANDO
+        """
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Controlador de Flota puede confirmar llegada a granja.",
+            )
+
+        now_dt = datetime.utcnow()
+        now_str = now_dt.isoformat() + "Z"
+
+        if db:
+            try:
+                try:
+                    uuid_val = UUID(order_id)
+                    stmt = select(OrderModel).where(or_(OrderModel.id == uuid_val, OrderModel.order_number == order_id))
+                except Exception:
+                    stmt = select(OrderModel).where(OrderModel.order_number == order_id)
+
+                res = await db.execute(stmt)
+                m = res.scalar_one_or_none()
+                if m:
+                    if not m.codigo_aris:
+                        raise HTTPException(status_code=400, detail="El pedido debe tener código Aris antes de confirmar llegada a granja.")
+                    if m.dispatch_phase in ("EN_TRANSITO", "ENTREGADO_CONFORME"):
+                        raise HTTPException(status_code=400, detail="El pedido ya está en tránsito o entregado.")
+                    if m.status == "CANCELADO":
+                        raise HTTPException(status_code=400, detail="No se puede operar sobre un pedido cancelado.")
+
+                    m.dispatch_phase = "EN_GRANJA_CARGANDO"
+                    m.dispatch_phase_updated_at = now_dt
+                    m.updated_at = now_dt
+
+                    current_log = list(m.audit_log or [])
+                    current_log.append({
+                        "id": f"log-{uuid4().hex[:6]}",
+                        "action": "LLEGADA_GRANJA",
+                        "actor_username": username,
+                        "actor_role": user_role,
+                        "timestamp": now_str,
+                        "description": f"Camión llegó a granja {m.assigned_farm_code} ({m.assigned_barn_code}).",
+                        "details": {
+                            "latitud": req.latitud_llegada,
+                            "longitud": req.longitud_llegada,
+                            "notas": req.notas,
+                        },
+                    })
+                    m.audit_log = current_log
+                    flag_modified(m, "audit_log")
+
+                    await db.commit()
+                    await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="despacho",
+                        title=f"Camión en granja: {m.order_number}",
+                        description=(
+                            f"El camión {m.transport_plate} llegó a {m.assigned_farm_code} "
+                            f"para cargar el pedido de {m.client_name}."
+                        ),
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="En granja",
+                    )
+
+                    return OrderResponse(**_model_to_order_dict(m))
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[ComercialService] Error confirmando llegada a granja: {e}")
+                await db.rollback()
+
+        raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
+
+    @classmethod
+    async def iniciar_ruta(
+        cls,
+        order_id: str,
+        user_role: str,
+        username: str,
+        req: Any,
+        db: Optional[AsyncSession] = None,
+        user_id: Optional[UUID] = None,
+    ) -> OrderResponse:
+        """
+        El Controlador de Flota confirma que el camión salió de granja con la carga.
+        status → DESPACHADO, dispatch_phase → EN_TRANSITO.
+        Se descuenta el stock físico de Pecuaria.
+        """
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Controlador de Flota puede iniciar la ruta.",
+            )
+
+        now_dt = datetime.utcnow()
+        now_str = now_dt.isoformat() + "Z"
+
+        if db:
+            try:
+                try:
+                    uuid_val = UUID(order_id)
+                    stmt = select(OrderModel).where(or_(OrderModel.id == uuid_val, OrderModel.order_number == order_id))
+                except Exception:
+                    stmt = select(OrderModel).where(OrderModel.order_number == order_id)
+
+                res = await db.execute(stmt)
+                m = res.scalar_one_or_none()
+                if m:
+                    if m.status == "CANCELADO":
+                        raise HTTPException(status_code=400, detail="No se puede operar sobre un pedido cancelado.")
+                    if m.dispatch_phase != "EN_GRANJA_CARGANDO" and m.dispatch_phase != "TRANSPORTE_ASIGNADO":
+                        raise HTTPException(status_code=400, detail="El camión debe estar en la granja para iniciar ruta.")
+                    if not m.codigo_aris:
+                        raise HTTPException(status_code=400, detail="El pedido debe tener código Aris.")
+
+                    dispatch_phase = "EN_TRANSITO"
+                    m.dispatch_phase = dispatch_phase
+                    m.dispatch_phase_updated_at = now_dt
+                    m.status = "DESPACHADO"
+                    m.updated_at = now_dt
+
+                    # Saca física: descuenta stock de Pecuaria
+                    await cls._dispatch_stock(db, m, user_id)
+
+                    current_log = list(m.audit_log or [])
+                    current_log.append({
+                        "id": f"log-{uuid4().hex[:6]}",
+                        "action": "RUTA_INICIADA",
+                        "actor_username": username,
+                        "actor_role": user_role,
+                        "timestamp": now_str,
+                        "description": f"Camión {m.transport_plate} salió de {m.assigned_farm_code} con {m.allocated_quantity:,} aves en ruta a {m.client_name}.",
+                        "details": {
+                            "latitud_salida": req.latitud_salida,
+                            "longitud_salida": req.longitud_salida,
+                            "kms_odometro": req.kms_odometro,
+                            "notas": req.notas,
+                        },
+                    })
+                    m.audit_log = current_log
+                    flag_modified(m, "audit_log")
+
+                    await db.commit()
+                    await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="entrega",
+                        title=f"{m.order_number} en ruta",
+                        description=(
+                            f"El camión {m.transport_plate} salió de {m.assigned_farm_code} "
+                            f"con {m.allocated_quantity:,} aves hacia {m.client_name}."
+                        ),
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="En ruta",
+                    )
+
+                    await notify(
+                        db,
+                        category="gestion_comercial",
+                        type="entrega",
+                        title=f"{m.order_number}: en ruta",
+                        description=(
+                            f"Despacho de {m.client_name} en tránsito. "
+                            f"Unidad: {m.transport_plate}."
+                        ),
+                        target_roles=["gestor_comercial", "gerente_comercial"],
+                        order_id=m.id,
+                        badge="En ruta",
+                    )
+
+                    return OrderResponse(**_model_to_order_dict(m))
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[ComercialService] Error iniciando ruta: {e}")
+                await db.rollback()
+
+        raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")
+
+    @classmethod
+    async def confirmar_entrega(
+        cls,
+        order_id: str,
+        user_role: str,
+        username: str,
+        req: Any,
+        db: Optional[AsyncSession] = None,
+    ) -> OrderResponse:
+        """
+        El Controlador de Flota confirma la entrega conforme.
+        dispatch_phase → ENTREGADO_CONFORME, status → DESPACHADO.
+        """
+        if user_role not in ("controlador_flota", "admin_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el Controlador de Flota puede confirmar la entrega.",
+            )
+
+        now_dt = datetime.utcnow()
+        now_str = now_dt.isoformat() + "Z"
+
+        if db:
+            try:
+                try:
+                    uuid_val = UUID(order_id)
+                    stmt = select(OrderModel).where(or_(OrderModel.id == uuid_val, OrderModel.order_number == order_id))
+                except Exception:
+                    stmt = select(OrderModel).where(OrderModel.order_number == order_id)
+
+                res = await db.execute(stmt)
+                m = res.scalar_one_or_none()
+                if m:
+                    if m.dispatch_phase == "ENTREGADO_CONFORME":
+                        raise HTTPException(status_code=409, detail="El pedido ya fue entregado.")
+                    if m.dispatch_phase != "EN_TRANSITO":
+                        raise HTTPException(status_code=400, detail="El pedido debe estar en ruta para confirmar entrega.")
+
+                    m.dispatch_phase = "ENTREGADO_CONFORME"
+                    m.dispatch_phase_updated_at = now_dt
+                    m.status = "DESPACHADO"
+                    m.updated_at = now_dt
+
+                    current_log = list(m.audit_log or [])
+                    current_log.append({
+                        "id": f"log-{uuid4().hex[:6]}",
+                        "action": "ENTREGA_CONFIRMADA",
+                        "actor_username": username,
+                        "actor_role": user_role,
+                        "timestamp": now_str,
+                        "description": f"Entrega conforme de {m.order_number} a {m.client_name}.",
+                        "details": {
+                            "latitud_entrega": req.latitud_entrega,
+                            "longitud_entrega": req.longitud_entrega,
+                            "nombre_recibe": req.nombre_recibe,
+                            "dni_recibe": req.dni_recibe,
+                            "notas": req.notas,
+                        },
+                    })
+                    m.audit_log = current_log
+                    flag_modified(m, "audit_log")
+
+                    await db.commit()
+                    await db.refresh(m)
+
+                    await notify(
+                        db,
+                        category="comercial",
+                        type="entrega",
+                        title=f"✅ {m.order_number} entregado",
+                        description=(
+                            f"El pedido de {m.client_name} fue entregado conforme. "
+                            f"Unidad: {m.transport_plate}."
+                        ),
+                        target_roles=["vendedor"],
+                        target_user_id=m.seller_user_id,
+                        order_id=m.id,
+                        badge="Entregado",
+                    )
+
+                    return OrderResponse(**_model_to_order_dict(m))
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[ComercialService] Error confirmando entrega: {e}")
+                await db.rollback()
+
+        raise HTTPException(status_code=404, detail=f"Pedido '{order_id}' no encontrado.")

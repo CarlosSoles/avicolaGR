@@ -95,6 +95,11 @@ class OrderModel(Base):
     dispatch_phase = Column(String(50), nullable=True)
     dispatch_phase_updated_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Código Aris (confirmación del gestor comercial)
+    codigo_aris = Column(String(20), nullable=True, unique=True)
+    codigo_aris_generated_at = Column(DateTime(timezone=True), nullable=True)
+    codigo_aris_generated_by = Column(String(100), nullable=True)
+
     audit_log = Column(JSONB, default=list, nullable=True)
     external_reference = Column(String(100), nullable=True)
     gestor_username = Column(String(100), nullable=True)

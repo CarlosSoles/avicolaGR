@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func, delete
 from fastapi import HTTPException, status
 
-from app.modules.admin.infrastructure.models import UserProfileModel
+from app.modules.admin.infrastructure.models import UserProfileModel, ZoneCageDensityModel
 from app.modules.admin.domain.schemas import (
     UserCreate,
     UserUpdate,
@@ -18,6 +18,8 @@ from app.modules.admin.domain.schemas import (
     LoginRequest,
     LoginResponse,
     FarmCatalogItem,
+    ZoneCageDensityItem,
+    ZoneCageDensityUpdateItem,
 )
 from app.core.security import (
     hash_password,
@@ -101,6 +103,13 @@ class AdminService:
                 "password": "123",
                 "full_name": "Jorge Alfaro Chavez",
                 "role": "registrador_pecuario",
+            },
+            {
+                "username": "controlador1",
+                "email": "controlador1@avicola.gr",
+                "password": "controlador1",
+                "full_name": "Controlador de Flota",
+                "role": "controlador_flota",
             },
         ]
 
@@ -429,4 +438,71 @@ class AdminService:
             latitude=matched.get("latitude"),
             longitude=matched.get("longitude"),
         )
+
+    DEFAULT_ZONE_DENSITIES = [
+        {"zone_code": "METROPOLITANA", "zone_name": "Metropolitana (Lima)", "male_density": 9, "female_density": 11},
+        {"zone_code": "NORTE", "zone_name": "Zona Norte", "male_density": 8, "female_density": 11},
+        {"zone_code": "CENTRO", "zone_name": "Zona Centro", "male_density": 9, "female_density": 11},
+        {"zone_code": "SUR", "zone_name": "Zona Sur", "male_density": 8, "female_density": 11},
+    ]
+
+    async def list_zone_densities(self) -> List[ZoneCageDensityItem]:
+        """Lista la configuración de densidad de carga por zona y sexo."""
+        res = await self.db.execute(select(ZoneCageDensityModel))
+        rows = {r.zone_code.upper(): r for r in res.scalars().all()}
+
+        # Garantizar filas iniciales en BD si faltara alguna zona
+        inserted = False
+        for default_item in self.DEFAULT_ZONE_DENSITIES:
+            if default_item["zone_code"] not in rows:
+                model = ZoneCageDensityModel(
+                    zone_code=default_item["zone_code"],
+                    zone_name=default_item["zone_name"],
+                    male_density=default_item["male_density"],
+                    female_density=default_item["female_density"],
+                )
+                self.db.add(model)
+                rows[default_item["zone_code"]] = model
+                inserted = True
+        if inserted:
+            await self.db.commit()
+            for model in rows.values():
+                await self.db.refresh(model)
+
+        order = {item["zone_code"]: idx for idx, item in enumerate(self.DEFAULT_ZONE_DENSITIES)}
+        ordered_rows = sorted(rows.values(), key=lambda r: order.get(r.zone_code.upper(), 99))
+        return [ZoneCageDensityItem.model_validate(r) for r in ordered_rows]
+
+    async def update_zone_densities(
+        self, items: List[ZoneCageDensityUpdateItem], user_id: UUID
+    ) -> List[ZoneCageDensityItem]:
+        """Actualiza la densidad por zona y sexo desde Administración."""
+        current = await self.list_zone_densities()
+        known_names = {c.zone_code.upper(): c.zone_name for c in current}
+
+        res = await self.db.execute(select(ZoneCageDensityModel))
+        existing_map = {r.zone_code.upper(): r for r in res.scalars().all()}
+
+        now = datetime.utcnow()
+        for item in items:
+            code = item.zone_code.strip().upper()
+            if code in existing_map:
+                row = existing_map[code]
+                row.male_density = item.male_density
+                row.female_density = item.female_density
+                row.updated_by_user_id = user_id
+                row.updated_at = now
+            else:
+                row = ZoneCageDensityModel(
+                    zone_code=code,
+                    zone_name=known_names.get(code, f"Zona {code.title()}"),
+                    male_density=item.male_density,
+                    female_density=item.female_density,
+                    updated_by_user_id=user_id,
+                    updated_at=now,
+                )
+                self.db.add(row)
+
+        await self.db.commit()
+        return await self.list_zone_densities()
 

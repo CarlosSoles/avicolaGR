@@ -61,7 +61,7 @@ class OrderCreate(BaseModel):
     client_tax_id: Optional[str] = Field(None, description="RUC o documento del cliente")
     seller_full_name: Optional[str] = Field(None, description="Nombre completo del vendedor")
     zone_code: str = Field("METROPOLITANA", description="Zona comercial de entrega")
-    target_delivery_date: str = Field(..., description="Fecha requerida de entrega (YYYY-MM-DD)")
+    target_delivery_date: Optional[str] = Field(None, description="Fecha de creación del pedido (YYYY-MM-DD, asignada automáticamente)")
     requested_quantity: int = Field(..., gt=0, description="Cantidad total de aves solicitadas")
     density_birds_per_cage: int = Field(
         8,
@@ -69,9 +69,9 @@ class OrderCreate(BaseModel):
         le=12,
         description="Densidad de carga en aves por jaula (7-12). Define cuántas jaulas requiere el pedido.",
     )
-    min_weight_kg: float = Field(..., gt=0, description="Peso mínimo requerido en kg")
-    max_weight_kg: float = Field(..., gt=0, description="Peso máximo requerido en kg")
-    sex_preference: str = Field("INDISTINTO", description="Preferencia de sexo: MACHO, HEMBRA o INDISTINTO")
+    min_weight_kg: Optional[float] = Field(None, gt=0, description="Peso mínimo requerido en kg (opcional, gestionado por Gestor Comercial)")
+    max_weight_kg: Optional[float] = Field(None, gt=0, description="Peso máximo requerido en kg (opcional, gestionado por Gestor Comercial)")
+    sex_preference: str = Field("MACHO", description="Preferencia de sexo: MACHO o HEMBRA")
     suggested_farm_code: Optional[str] = Field(None, description="Código de granja orientativa de Pecuaria")
     suggested_barn_code: Optional[str] = Field(None, description="Código de galpón orientativo de Pecuaria")
     external_reference: Optional[str] = Field(None, description="Orden de Compra u OC del cliente")
@@ -153,6 +153,10 @@ class OrderResponse(BaseModel):
     # Ciclo de Vida del Despacho (Tracking de 4 Fases)
     dispatch_phase: Optional[str] = None
     dispatch_phase_updated_at: Optional[str] = None
+    # Código Aris (generado por Gestor Comercial)
+    codigo_aris: Optional[str] = None
+    codigo_aris_generated_at: Optional[str] = None
+    codigo_aris_generated_by: Optional[str] = None
     # Historial de Auditoría y Trazabilidad
     audit_log: List[AuditLogEntry] = Field(default_factory=list)
     # Fraccionamiento y Split de Pedidos
@@ -176,6 +180,32 @@ class UpdateDispatchPhaseRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class GenerarCodigoArisResponse(BaseModel):
+    codigo_aris: str
+    mensaje: str
+
+
+class ConfirmarLlegadaGranjaRequest(BaseModel):
+    latitud_llegada: Optional[float] = Field(None, ge=-90, le=90, description="Latitud GPS de la posición de llegada a granja")
+    longitud_llegada: Optional[float] = Field(None, ge=-180, le=180, description="Longitud GPS de la posición de llegada a granja")
+    notas: Optional[str] = Field(None, description="Notas del operador al llegar a granja")
+
+
+class ConfirmarInicioRutaRequest(BaseModel):
+    latitud_salida: Optional[float] = Field(None, ge=-90, le=90, description="Latitud GPS de salida de granja")
+    longitud_salida: Optional[float] = Field(None, ge=-180, le=180, description="Longitud GPS de salida de granja")
+    kms_odometro: Optional[int] = Field(None, ge=0, description="Kilometraje del odómetro al salir de granja")
+    notas: Optional[str] = None
+
+
+class ConfirmarEntregaRequest(BaseModel):
+    latitud_entrega: Optional[float] = Field(None, ge=-90, le=90, description="Latitud GPS del punto de entrega")
+    longitud_entrega: Optional[float] = Field(None, ge=-180, le=180, description="Longitud GPS del punto de entrega")
+    nombre_recibe: Optional[str] = Field(None, description="Nombre de quien recibe la mercadería")
+    dni_recibe: Optional[str] = Field(None, description="DNI de quien recibe")
+    notas: Optional[str] = None
+
+
 class TransportVehicle(BaseModel):
     id: str
     plate: str = Field(..., description="Placa de rodaje de la unidad")
@@ -187,6 +217,33 @@ class TransportVehicle(BaseModel):
     default_crew: Optional[str] = Field(None, description="Cuadrilla de atrape asignada habitualmente")
     zone_coverage: List[str] = Field(default_factory=list, description="Zonas que cubre el camión")
     status: str = Field("DISPONIBLE", description="Estado: DISPONIBLE, ASIGNADO, EN_MANTENIMIENTO")
+
+
+class TransportVehicleCreate(BaseModel):
+    plate: str = Field(..., min_length=4, max_length=20, description="Placa de rodaje de la unidad")
+    model: str = Field(..., min_length=2, max_length=100, description="Tipo o modelo de vehículo")
+    capacity_cages: int = Field(..., ge=50, le=2000, description="Capacidad máxima de jaulas")
+    capacity_birds: Optional[int] = Field(None, ge=100, le=20000, description="Capacidad orientativa en aves")
+    driver_name: str = Field(..., min_length=2, max_length=150, description="Nombre del conductor titular")
+    driver_phone: Optional[str] = Field("", description="Teléfono del conductor")
+    default_crew: Optional[str] = Field("Cuadrilla Oficial", description="Cuadrilla de atrape asignada")
+    zone_coverage: List[str] = Field(
+        default_factory=lambda: ["NORTE", "CENTRO", "SUR", "METROPOLITANA"],
+        description="Zonas de cobertura",
+    )
+    status: str = Field("DISPONIBLE", description="Estado: DISPONIBLE, ASIGNADO, EN_MANTENIMIENTO")
+
+
+class TransportVehicleUpdate(BaseModel):
+    plate: Optional[str] = Field(None, min_length=4, max_length=20)
+    model: Optional[str] = Field(None, min_length=2, max_length=100)
+    capacity_cages: Optional[int] = Field(None, ge=50, le=2000)
+    capacity_birds: Optional[int] = Field(None, ge=100, le=20000)
+    driver_name: Optional[str] = Field(None, min_length=2, max_length=150)
+    driver_phone: Optional[str] = None
+    default_crew: Optional[str] = None
+    zone_coverage: Optional[List[str]] = None
+    status: Optional[str] = None
 
 
 class AssignTransportRequest(BaseModel):

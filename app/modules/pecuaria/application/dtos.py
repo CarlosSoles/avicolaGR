@@ -35,11 +35,14 @@ class TablaGeneralSaldoItemDTO(BaseModel):
     batch_id: Optional[UUID] = None
     batch_code: Optional[str] = None
     
-    # Las 7 columnas obligatorias
+    # Las 7 columnas obligatorias y métricas de tabla
+    campaign: str = Field(default="208", description="Código de campaña productiva")
     bird_age_days: int = Field(description="Edad calculada del lote en días (Fecha actual - Fecha encaste)")
     specials_general_count: int = Field(description="Cantidad general de aves especiales observadas en el galpón")
     barn_balance_available: int = Field(description="Saldo por galpón disponible libre de compromisos")
     average_weight_kg: Optional[float] = Field(default=None, description="Peso promedio representativo en kg (x̄)")
+    average_weight_g: Optional[float] = Field(default=None, description="Peso promedio representativo en gramos")
+    standard_weight_g: Optional[int] = Field(default=None, description="Peso estándar objetivo por edad y sexo en gramos")
     min_weight_kg: Optional[float] = Field(default=None, description="Peso mínimo registrado en la muestra")
     max_weight_kg: Optional[float] = Field(default=None, description="Peso máximo registrado en la muestra")
     weight_range_label: Optional[str] = Field(default=None, description="Rango de peso formateado (ej: 2.45 - 2.85 kg)")

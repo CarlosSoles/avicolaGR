@@ -16,6 +16,7 @@ from app.modules.pecuaria.infrastructure.models import (
     BarnModel,
     BatchModel,
     BarnInventoryModel,
+    PoultryWeightStandardModel,
     WeighingSampleModel,
     IndividualWeightModel,
     SpecialFindingModel,
@@ -51,6 +52,23 @@ from app.shared.infrastructure.notifier import notify
 
 
 class PecuariaService:
+
+    @staticmethod
+    async def _lookup_standard_weight_g(
+        db: AsyncSession, age_days: int, sex: str
+    ) -> Optional[int]:
+        """Obtiene el peso estándar objetivo (g) desde poultry_weight_standards."""
+        clamped_age = max(1, min(70, age_days or 1))
+        upper_sex = (sex or "").upper()
+        if upper_sex not in ("MACHO", "HEMBRA"):
+            upper_sex = "MACHO"
+        res = await db.execute(
+            select(PoultryWeightStandardModel.standard_weight_g).where(
+                PoultryWeightStandardModel.age_days == clamped_age,
+                PoultryWeightStandardModel.sex == upper_sex,
+            )
+        )
+        return res.scalar_one_or_none()
 
     # ==========================================================================
     # 1. TABLA GENERAL DE SALDO (CONSULTA CENTRAL DE PECUARIA)
@@ -95,6 +113,13 @@ class PecuariaService:
         result = await db.execute(query)
         inventories = result.scalars().all()
 
+        # Cargar tabla de pesos estándar desde BD para cualquier respaldo por edad y sexo
+        standards_res = await db.execute(select(PoultryWeightStandardModel))
+        standards_map = {
+            (s.age_days, s.sex): s.standard_weight_g
+            for s in standards_res.scalars().all()
+        }
+
         items: List[TablaGeneralSaldoItemDTO] = []
         today = date.today()
 
@@ -112,10 +137,26 @@ class PecuariaService:
             if max_age is not None and age_days > max_age:
                 continue
 
-            avg_w = float(inv.last_average_weight) if inv.last_average_weight else None
-            min_w = round(max(0.5, avg_w - 0.18), 2) if avg_w else None
-            max_w = round(avg_w + 0.20, 2) if avg_w else None
-            range_label = f"{min_w:.2f} - {max_w:.2f} kg" if avg_w else None
+            avg_g = (
+                round(float(inv.average_weight_g), 2)
+                if inv.average_weight_g is not None
+                else (round(float(inv.last_average_weight) * 1000.0, 2) if inv.last_average_weight else None)
+            )
+            avg_w = (
+                float(inv.last_average_weight)
+                if inv.last_average_weight
+                else (round(avg_g / 1000.0, 3) if avg_g else None)
+            )
+
+            clamped_age = max(1, min(70, age_days or 1))
+            lookup_sex = batch.sex if batch.sex in ("MACHO", "HEMBRA") else "MACHO"
+            std_weight_g = inv.standard_weight_g or standards_map.get((clamped_age, lookup_sex))
+
+            min_w = round(max(0.5, avg_w - 0.18), 3) if avg_w else None
+            max_w = round(avg_w + 0.20, 3) if avg_w else None
+            range_label = f"{min_w:.2f} - {max_w:.2f} kg" if (min_w is not None and max_w is not None) else None
+
+            record_date = inv.updated_at or batch.created_at or datetime.utcnow()
 
             items.append(
                 TablaGeneralSaldoItemDTO(
@@ -129,10 +170,13 @@ class PecuariaService:
                     barn_status=barn.status,
                     batch_id=batch.id,
                     batch_code=batch.batch_code,
+                    campaign=inv.campaign or "208",
                     bird_age_days=age_days,
                     specials_general_count=inv.specials_count,
                     barn_balance_available=inv.available_count,
                     average_weight_kg=avg_w,
+                    average_weight_g=avg_g,
+                    standard_weight_g=std_weight_g,
                     min_weight_kg=min_w,
                     max_weight_kg=max_w,
                     weight_range_label=range_label,
@@ -140,7 +184,7 @@ class PecuariaService:
                     physical_count=inv.physical_count,
                     reserved_count=inv.reserved_count,
                     sold_pending_count=inv.sold_pending_count,
-                    last_inventory_update=inv.updated_at,
+                    last_inventory_update=record_date,
                 )
             )
 
@@ -211,6 +255,9 @@ class PecuariaService:
                 select(BarnInventoryModel).where(BarnInventoryModel.barn_id == dto.barn_id)
             )
             inventory = inv_res.scalar_one_or_none()
+            std_weight_g = await PecuariaService._lookup_standard_weight_g(
+                db, max(1, (date.today() - dto.hatch_date).days), dto.sex
+            )
 
             if inventory:
                 inventory.current_batch_id = batch.id
@@ -219,6 +266,9 @@ class PecuariaService:
                 inventory.reserved_count = 0
                 inventory.sold_pending_count = 0
                 inventory.last_average_weight = None
+                inventory.average_weight_g = None
+                inventory.standard_weight_g = std_weight_g
+                inventory.campaign = "208"
             else:
                 inventory = BarnInventoryModel(
                     barn_id=dto.barn_id,
@@ -227,6 +277,8 @@ class PecuariaService:
                     specials_count=0,
                     reserved_count=0,
                     sold_pending_count=0,
+                    campaign="208",
+                    standard_weight_g=std_weight_g,
                 )
                 db.add(inventory)
 
@@ -370,6 +422,7 @@ class PecuariaService:
             inv = inv_res.scalar_one_or_none()
             if inv:
                 inv.last_average_weight = sample.average_weight
+                inv.average_weight_g = round(avg_weight * 1000.0, 2)
                 inv.updated_at = datetime.utcnow()
 
             await log_audit_event(

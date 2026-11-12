@@ -18,16 +18,22 @@ from app.modules.comercial.domain.schemas import (
     OrderResponse,
     ProgramacionTransporteResponse,
     TransportVehicle,
+    TransportVehicleCreate,
+    TransportVehicleUpdate,
     AssignTransportRequest,
     UpdateDispatchPhaseRequest,
     UpdateDensityRequest,
+    GenerarCodigoArisResponse,
+    ConfirmarLlegadaGranjaRequest,
+    ConfirmarInicioRutaRequest,
+    ConfirmarEntregaRequest,
 )
 from app.modules.comercial.application.service import ComercialService
 
 router = APIRouter(prefix="/comercial", tags=["Módulo Comercial"])
 
-# Roles con visibilidad total de la cartera comercial
-FULL_VISIBILITY_ROLES = ("admin_sistema", "gestor_comercial", "gerente_comercial")
+# Roles con visibilidad total de la cartera comercial (incluye Control de Flota para programar camiones)
+FULL_VISIBILITY_ROLES = ("admin_sistema", "gestor_comercial", "gerente_comercial", "controlador_flota")
 
 
 def _scoped_seller(current_user: AuthenticatedUser, requested: Optional[str]) -> Optional[str]:
@@ -330,25 +336,89 @@ async def list_transport_vehicles(
 
 
 @router.post(
+    "/transport/vehicles",
+    response_model=TransportVehicle,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar una nueva unidad en la Flota de Distribución (Controlador de Flota)",
+)
+async def create_transport_vehicle(
+    vehicle_in: TransportVehicleCreate,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Registra un nuevo camión de distribución con placa, capacidad jaulera, chofer, cuadrilla y zonas."""
+    return await ComercialService.create_transport_vehicle(
+        vehicle_in=vehicle_in,
+        user_role=current_user.role,
+        db=db,
+    )
+
+
+@router.put(
+    "/transport/vehicles/{vehicle_id}",
+    response_model=TransportVehicle,
+    summary="Actualizar datos de una unidad de transporte (Controlador de Flota)",
+)
+async def update_transport_vehicle(
+    vehicle_id: str,
+    vehicle_in: TransportVehicleUpdate,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Actualiza placa, modelo, capacidad, chofer, cuadrilla, zonas o estado del vehículo."""
+    return await ComercialService.update_transport_vehicle(
+        vehicle_id=vehicle_id,
+        vehicle_in=vehicle_in,
+        user_role=current_user.role,
+        db=db,
+    )
+
+
+@router.delete(
+    "/transport/vehicles/{vehicle_id}",
+    summary="Eliminar una unidad de la Flota de Distribución (Controlador de Flota)",
+)
+async def delete_transport_vehicle(
+    vehicle_id: str,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Elimina un camión de la flota si no tiene pedidos activos asignados."""
+    return await ComercialService.delete_transport_vehicle(
+        vehicle_id=vehicle_id,
+        user_role=current_user.role,
+        db=db,
+    )
+
+
+@router.post(
     "/orders/{order_id}/assign-transport",
     response_model=OrderResponse,
-    summary="Designar vehículo y chofer de transporte al pedido (Gestor Comercial)",
+    summary="Designar vehículo y chofer de transporte al pedido (Controlador de Flota)",
 )
 async def assign_transport(
     order_id: str,
     transport_req: AssignTransportRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Designa formalmente la unidad de transporte, conductor, turno y cuadrilla a un pedido aprobado.
-    Acción exclusiva del Gestor Comercial.
+    Acción exclusiva del Controlador de Flota.
     """
-    gestor_name = current_user.username or "gestor_comercial"
+    actor_name = current_user.username or "controlador_flota"
     return await ComercialService.assign_transport_to_order(
         order_id=order_id,
         user_role=current_user.role,
-        gestor_username=gestor_name,
+        gestor_username=actor_name,
         transport_req=transport_req,
         db=db,
     )
@@ -357,21 +427,23 @@ async def assign_transport(
 @router.post(
     "/orders/{order_id}/unassign-transport",
     response_model=OrderResponse,
-    summary="Liberar transporte asignado a un pedido (Gestor Comercial)",
+    summary="Liberar transporte asignado a un pedido (Controlador de Flota)",
 )
 async def unassign_transport(
     order_id: str,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Libera el transporte asignado a un pedido para permitir reasignar una nueva unidad.
     """
-    gestor_name = current_user.username or "gestor_comercial"
+    actor_name = current_user.username or "controlador_flota"
     return await ComercialService.unassign_transport_from_order(
         order_id=order_id,
         user_role=current_user.role,
-        gestor_username=gestor_name,
+        gestor_username=actor_name,
         db=db,
     )
 
@@ -385,7 +457,7 @@ async def update_dispatch_phase(
     order_id: str,
     phase_req: UpdateDispatchPhaseRequest,
     current_user: AuthenticatedUser = Depends(
-        require_role(["gestor_comercial", "gerente_comercial", "admin_sistema"])
+        require_role(["controlador_flota", "gestor_comercial", "gerente_comercial", "admin_sistema"])
     ),
     db: AsyncSession = Depends(get_db),
 ):
@@ -433,5 +505,119 @@ async def update_order_density(
         density_birds_per_cage=density_req.density_birds_per_cage,
         user_role=current_user.role,
         username=username,
+        db=db,
+    )
+
+
+# ==============================================================================
+# 6. CICLO DE VIDA DEL PEDIDO: CÓDIGO ARIS + CONFIRMACIONES DEL CONTROLADOR
+# ==============================================================================
+
+@router.post(
+    "/orders/{order_id}/generar-codigo-aris",
+    response_model=OrderResponse,
+    summary="Generar Código Aris para el pedido (Gestor Comercial)",
+)
+async def generar_codigo_aris(
+    order_id: str,
+    current_user: AuthenticatedUser = Depends(
+        require_role(["gestor_comercial", "gerente_comercial", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    El Gestor Comercial genera un código Aris único para el pedido.
+    Requisito: el pedido debe estar aprobado/reservado y con transporte asignado.
+    Al generarlo, el pedido pasa al estado derivado 'Confirmado (código Aris)'.
+    """
+    gestor_name = current_user.username or "gestor_comercial"
+    return await ComercialService.generar_codigo_aris(
+        order_id=order_id,
+        user_role=current_user.role,
+        username=gestor_name,
+        db=db,
+    )
+
+
+@router.post(
+    "/orders/{order_id}/confirmar-llegada-granja",
+    response_model=OrderResponse,
+    summary="Confirmar que el camión llegó a la granja (Controlador de Flota)",
+)
+async def confirmar_llegada_granja(
+    order_id: str,
+    req: ConfirmarLlegadaGranjaRequest = ConfirmarLlegadaGranjaRequest(),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    El Controlador de Flota confirma que el camión llegó a la granja de origen.
+    Requiere que el pedido tenga código Aris generado.
+    Actualiza dispatch_phase a EN_GRANJA_CARGANDO.
+    """
+    username = current_user.username or "controlador_flota"
+    return await ComercialService.confirmar_llegada_granja(
+        order_id=order_id,
+        user_role=current_user.role,
+        username=username,
+        req=req,
+        db=db,
+    )
+
+
+@router.post(
+    "/orders/{order_id}/iniciar-ruta",
+    response_model=OrderResponse,
+    summary="Iniciar ruta de despacho (Controlador de Flota / GPS)",
+)
+async def iniciar_ruta(
+    order_id: str,
+    req: ConfirmarInicioRutaRequest = ConfirmarInicioRutaRequest(),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    El Controlador de Flota confirma que el camión salió de la granja con la carga.
+    El pedido pasa a estado 'DESPACHADO' y dispatch_phase a 'EN_TRANSITO'.
+    Se descuenta el stock físico de Pecuaria.
+    """
+    username = current_user.username or "controlador_flota"
+    return await ComercialService.iniciar_ruta(
+        order_id=order_id,
+        user_role=current_user.role,
+        username=username,
+        req=req,
+        db=db,
+        user_id=current_user.id,
+    )
+
+
+@router.post(
+    "/orders/{order_id}/confirmar-entrega",
+    response_model=OrderResponse,
+    summary="Confirmar entrega conforme en destino (Controlador de Flota)",
+)
+async def confirmar_entrega(
+    order_id: str,
+    req: ConfirmarEntregaRequest = ConfirmarEntregaRequest(),
+    current_user: AuthenticatedUser = Depends(
+        require_role(["controlador_flota", "admin_sistema"])
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    El Controlador de Flota confirma la entrega conforme en el punto de destino.
+    El pedido pasa a dispatch_phase 'ENTREGADO_CONFORME' y estado 'DESPACHADO'.
+    """
+    username = current_user.username or "controlador_flota"
+    return await ComercialService.confirmar_entrega(
+        order_id=order_id,
+        user_role=current_user.role,
+        username=username,
+        req=req,
         db=db,
     )
