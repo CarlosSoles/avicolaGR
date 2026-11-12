@@ -7,6 +7,7 @@ import re
 import time
 import unicodedata
 from typing import List, Dict, Any, Optional
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.agent.domain.schemas import (
@@ -22,70 +23,6 @@ from app.modules.agent.infrastructure.distances import (
 from app.modules.agent.infrastructure.gemini_client import RoxiGeminiClient
 from app.modules.pecuaria.application.service import PecuariaService
 from app.modules.comercial.application.service import ComercialService
-
-# Catálogo predeterminado en memoria de galpones oficiales en caso de inicialización temprana
-MOCK_FARMS_INVENTORY = [
-    {
-        "farm_code": "TRAD1",
-        "farm_name": "Tradisa 1",
-        "barn_code": "G-01",
-        "age_days": 45.4,
-        "available_birds": 12500,
-        "current_weight": 2.45,
-        "sex": "MACHO",
-        "status": "OPERATIVO",
-    },
-    {
-        "farm_code": "PACI6",
-        "farm_name": "Pacifico 6",
-        "barn_code": "G-02",
-        "age_days": 43.8,
-        "available_birds": 14200,
-        "current_weight": 2.52,
-        "sex": "INDISTINTO",
-        "status": "OPERATIVO",
-    },
-    {
-        "farm_code": "TRAD2",
-        "farm_name": "Tradisa II",
-        "barn_code": "G-03",
-        "age_days": 42.1,
-        "available_birds": 9800,
-        "current_weight": 2.22,
-        "sex": "HEMBRA",
-        "status": "OPERATIVO",
-    },
-    {
-        "farm_code": "SISA1",
-        "farm_name": "Santa Isabel 1",
-        "barn_code": "G-05",
-        "age_days": 46.2,
-        "available_birds": 8300,
-        "current_weight": 2.65,
-        "sex": "MACHO",
-        "status": "OPERATIVO",
-    },
-    {
-        "farm_code": "MORI2",
-        "farm_name": "Puerto Mori 2",
-        "barn_code": "G-06",
-        "age_days": 44.0,
-        "available_birds": 11000,
-        "current_weight": 2.35,
-        "sex": "INDISTINTO",
-        "status": "OPERATIVO",
-    },
-    {
-        "farm_code": "SEMIA",
-        "farm_name": "Semillero A",
-        "barn_code": "G-04",
-        "age_days": 41.5,
-        "available_birds": 15000,
-        "current_weight": 2.28,
-        "sex": "HEMBRA",
-        "status": "OPERATIVO",
-    },
-]
 
 
 class RoxiAgentService:
@@ -119,10 +56,9 @@ class RoxiAgentService:
                     if live_list:
                         return live_list
             except Exception as e:
-                # Si la base de datos se encuentra aún sin datos iniciales o con conexión temporal
-                pass
+                print(f"[ROXI] Error leyendo inventario en vivo de galpones: {e}")
 
-        return MOCK_FARMS_INVENTORY
+        return []
 
     async def _get_farm_coordinates(self) -> Dict[str, tuple]:
         """Coordenadas reales de las granjas (para calcular cercanía al punto de entrega)."""
@@ -262,6 +198,12 @@ class RoxiAgentService:
                         "distance_km": dist_km,
                         "distance_source": dist_source,
                     })
+
+        if not candidates:
+            raise HTTPException(
+                status_code=404,
+                detail="No hay galpones operativos con saldo disponible en la base de datos.",
+            )
 
         # Pre-evaluación multicriterio: pondera edad (40), distancia real al cliente (30),
         # calibre de peso (20) y saldo disponible (10), evitando que un solo criterio domine al 100%.
