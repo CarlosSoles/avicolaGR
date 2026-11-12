@@ -139,6 +139,8 @@ class AdminService:
                 existing.full_name = u["full_name"]
                 existing.role = u["role"]
                 existing.is_active = True
+                if not existing.password_hash:
+                    existing.password_hash = hash_password(u["password"])
 
         await self.db.commit()
 
