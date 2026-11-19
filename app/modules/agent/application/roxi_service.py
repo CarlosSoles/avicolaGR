@@ -628,6 +628,28 @@ class RoxiAgentService:
         if order_context:
             snapshot["contexto_ui"] = order_context
 
+        # Enriquecimiento ejecutivo para Gerente General o consultas de alto nivel
+        if user_role == "gerente_general" or (norm_query and any(k in norm_query for k in ("kpi", "gerent", "ejecutiv", "directiv", "ranking", "desempen", "cumplimiento", "tonelad"))):
+            if self.db is not None:
+                try:
+                    from app.modules.gerencia_general.application.service import GerenciaGeneralService
+                    gg_service = GerenciaGeneralService(self.db)
+                    gg_rep = await gg_service.get_consolidated_report()
+                    snapshot["gerencia_ejecutiva"] = {
+                        "total_birds_sold": gg_rep.kpis.total_birds_sold,
+                        "total_tons_sold": gg_rep.kpis.total_tons_sold,
+                        "fulfillment_rate": gg_rep.kpis.fulfillment_rate,
+                        "birds_in_stock": gg_rep.kpis.birds_in_stock,
+                        "active_barns": gg_rep.kpis.active_barns,
+                        "avg_weight_kg": gg_rep.kpis.avg_weight_kg,
+                        "top_clients": [c.model_dump() for c in gg_rep.sales.top_clients[:5]],
+                        "sellers_ranking": [s.model_dump() for s in gg_rep.staff.sellers_ranking[:5]],
+                        "drivers_performance": [d.model_dump() for d in gg_rep.staff.drivers_performance[:5]],
+                        "logistics": gg_rep.logistics.model_dump(),
+                    }
+                except Exception as e:
+                    print(f"[ROXI] Error enriqueciendo contexto ejecutivo: {e}")
+
         return snapshot
 
     async def chat(self, req: RoxiChatRequest) -> RoxiChatResponse:

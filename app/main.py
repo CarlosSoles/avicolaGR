@@ -16,6 +16,7 @@ from app.shared.domain.exceptions import DomainException
 from app.modules.pecuaria.presentation.router import router as pecuaria_router
 from app.modules.admin.presentation.router import auth_router, admin_router, notifications_router
 from app.modules.comercial.presentation.router import router as comercial_router
+from app.modules.gerencia_general.presentation.router import router as gerencia_general_router
 from app.modules.agent.presentation.router import router as agent_router
 from app.modules.admin.application.service import AdminService
 
@@ -88,6 +89,7 @@ app.include_router(admin_router, prefix=settings.API_V1_PREFIX)
 app.include_router(notifications_router, prefix=settings.API_V1_PREFIX)
 app.include_router(pecuaria_router, prefix=settings.API_V1_PREFIX)
 app.include_router(comercial_router, prefix=settings.API_V1_PREFIX)
+app.include_router(gerencia_general_router, prefix=settings.API_V1_PREFIX)
 app.include_router(agent_router, prefix=settings.API_V1_PREFIX)
 
 

@@ -111,6 +111,13 @@ class AdminService:
                 "full_name": "Controlador de Flota",
                 "role": "controlador_flota",
             },
+            {
+                "username": "gerente",
+                "email": "gerente@avicolagr.com",
+                "password": "gerente1",
+                "full_name": "Gerente General de la Avícola",
+                "role": "gerente_general",
+            },
         ]
 
         for u in default_seed_users:
@@ -173,6 +180,26 @@ class AdminService:
                 token_type="bearer",
                 user=UserProfileResponse.model_validate(admin),
             )
+
+        # 1.1 Caso especial: Gerente General solicitado explícitamente (gerente / gerente1)
+        if clean_user.lower() in ("gerente", "gerente@avicolagr.com") and clean_pass == "gerente1":
+            await self.ensure_default_system_users()
+            stmt = select(UserProfileModel).where(func.lower(UserProfileModel.username) == "gerente")
+            res = await self.db.execute(stmt)
+            gerente = res.scalar_one_or_none()
+            if gerente:
+                token = create_access_token(
+                    user_id=gerente.id,
+                    email=gerente.email,
+                    role=gerente.role,
+                    username=gerente.username,
+                    full_name=gerente.full_name,
+                )
+                return LoginResponse(
+                    access_token=token,
+                    token_type="bearer",
+                    user=UserProfileResponse.model_validate(gerente),
+                )
 
         # 2. Búsqueda en base de datos por username o email
         stmt = select(UserProfileModel).where(

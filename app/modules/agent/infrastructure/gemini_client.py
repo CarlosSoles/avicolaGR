@@ -379,6 +379,28 @@ class RoxiGeminiClient:
         pend_top = ctx.get("pedidos_pendientes_top") or []
         foco = ctx.get("pedido_en_foco")
         especifica = ctx.get("consulta_especifica")
+        gej = ctx.get("gerencia_ejecutiva")
+
+        if gej and any(k in q for k in ("gerent", "ejecutiv", "directiv", "resumen", "kpi", "ventas", "ranking", "personal", "balance", "directorio")):
+            reply = (
+                f"**Resumen Ejecutivo ROXI (Gerencia General):**\n"
+                f"- **Aves vendidas:** {gej.get('total_birds_sold', 0):,} aves ({gej.get('total_tons_sold', 0)} TM)\n"
+                f"- **Tasa de cumplimiento:** {gej.get('fulfillment_rate', 0)}%\n"
+                f"- **Stock en pie en granjas:** {gej.get('birds_in_stock', 0):,} aves en {gej.get('active_barns', 0)} galpones activos\n"
+                f"- **Peso promedio general:** {gej.get('avg_weight_kg', 0)} kg\n"
+                f"- **Utilización de flota:** {gej.get('logistics', {}).get('fleet_utilization_pct', 0)}%"
+            )
+            spoken = (
+                f"Informe ejecutivo: Se registran {gej.get('total_birds_sold', 0)} aves vendidas con un cumplimiento del "
+                f"{gej.get('fulfillment_rate', 0)} por ciento, y un stock disponible de {gej.get('birds_in_stock', 0)} aves."
+            )
+            return {
+                "reply": reply,
+                "spoken_reply": spoken,
+                "in_scope": True,
+                "suggested_action": None,
+                "action_payload": None,
+            }
 
         if isinstance(especifica, dict):
             tipo = especifica.get("tipo")
